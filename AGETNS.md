@@ -31,3 +31,9 @@ Polygon 是 CodeForces 开发的信息学竞赛组题协作平台，正在成为
 
 我计划用多 agent 的系统实现，与用户交互的是 supervisor，它可以调用根据 idea 出题、找题、改编题目、造数据、写 validator、写 std 等任务的子 agent。
  
+---
+
+数据结构见 DS.md
+目录结构和配置文件格式见 FILES.md
+
+（没有或有修改则修改这些文件）

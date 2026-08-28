@@ -82,6 +82,21 @@ struct Problem {
 ```
 
 ### 组件状态
+
+```rust
+struct SolutionStatus {
+    expected: JudgingStatus,
+}
+```
+
+```rust
+struct DataStatus {
+    data_type: DataType,    // Blob | Generated
+}
+```
+
+需要实现一个 `GetStatus` trait，以上这些组件类型（包括 `Problem` 和 `Contest`）都实现这个 trait，调用一个 `get_status` 函数会返回以下类型：
+
 ```rust
 enum ComponentStatus {
     NotStarted,
@@ -91,19 +106,6 @@ enum ComponentStatus {
 }
 ```
 
-```rust
-struct SolutionStatus {
-    expected: JudgingStatus,
-    comp_status: ComponentStatus,
-}
-```
-
-```rust
-struct DataStatus {
-    data_type: DataType,    // Blob | Generated
-    comp_status: CompomentStatus,
-}
-```
 ## 目录结构  
 
 contest_name

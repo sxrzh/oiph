@@ -1,36 +1,94 @@
 ## 目录结构  
 
 contest_name
-    - contest.yaml
+    - config.yaml            # 比赛配置（名称、id、题目列表、创建时间）
+    - .oiph/
+        - kb/                # 工程知识库（kb.json）
+        - skills/            # 工程 skills（<名>/SKILL.md）
+        - sessions/          # 会话（<名>.json + current 指针文件）
     - problem_name_a
-        - problem.yaml
+        - config.yaml        # 题目配置（名称、类型、来源、标签、时限、各组件状态）
         - statement
-            - zh_cn.md
+            - zh_cn.md       # 题面（Markdown + LaTeX）
+            - tutorial.md    # 题解（可选，也写在 statement 下）
             - down
-                - 下发文件
+                - 下发文件（交互库等）
         - data
+            - config.yaml    # 测试点配置（subtasks 列表）
             - 1.in
             - 1.ans
-            - ... 
+            - ...            # 或：generator.cpp（生成器）
         - auxiliary
             - generator.cpp
             - validator.cpp
             - checker.cpp
-            - interactive_lib.cpp
+            - interactive_lib.cpp（如需要）
+        - solutions
+            - std.cpp        # 标准答案
+            - <name>.cpp     # 其他解法（暴力、错误解法等）
     - problem_name_b
         - ...
 
+## 全局数据（不在工程内）
+
+- `~/.oiph/kb/`：全局知识库（仓库 `assets/kb/` 文档在启动时自动种子到此）
+- `~/.oiph/skills/`：全局 skills（`<名>/SKILL.md`；仓库 `assets/skills/` 在启动时自动种子到此）
+- 检索时合并全局与工程知识库；skills 同名时工程覆盖全局
+
 ## 配置文件结构
 
-配置文件全部采用 YAML 格式
+配置文件全部采用 YAML 格式。
 
-contest.yaml 包括比赛名称、题目列表（对应子目录名称）
-problem.yaml 包括题目名称、类型时间限制、空间限制、编译选项、测试点配置
-测试点配置是一个列表，每一项表示一个子任务，子任务有以下字段：
-例如：
-    score: 30        # 分数
+### 比赛 config.yaml
+
+- `id`：比赛唯一 id（UUID）
+- `name`：比赛名称
+- `problems`：题目目录名列表
+- `config`：`start_time` / `duration_min` / `notes`（可选）
+- `created_at`：创建时间
+
+### 题目 config.yaml
+
+- `id`：题目目录名
+- `name`：题目名称
+- `problem_type`：`traditional` | `interactive_lib` | `interactive_io` | `answer_only` | `function`
+- `source`：`original`（原创）| `moved`（搬运）| `adapted`（改编）
+- `tags`：知识点标签列表
+- `time_limit_ms` / `memory_limit_mb` / `compile_flags`：评测参数
+- 各组件状态（见下）：`statement`、`std`、`sols`、`data`、`validator`、`checker`、`interactive_lib`、`tutorial`
+- `duplicate_check`：查重结果（`found`/`matches`/`checked_at`/`note`）
+- `files`：各组件相对路径
+
+组件状态为带内部标签的枚举（实现 `GetStatus` trait，聚合规则：Failed > InProgress > Completed > NotStarted）：
+
+```yaml
+statement:
+  state: not_started            # | in_progress { progress, message }
+                                # | completed { timestamp }
+                                # | failed { error }
+```
+
+`sols` 是列表，每项含 `name`、`file`、`expected`（预期评测结果 `verdict`/`score`）与状态：
+
+```yaml
+sols:
+  - name: brute
+    file: solutions/brute.cpp
+    expected:
+      verdict: WA
+      score: 30.0
+    status:
+      state: not_started
+```
+
+### data/config.yaml（测试点配置）
+
+```yaml
+subtasks:
+  - score: 30        # 分数
     type: sum        # 子任务计分方式，包括 sum, min, mul
+    cases: [1, 2]    # 测试点编号列表
     pretest: true    # 是否是 pretest，不写此字段则默认为 false
     sample: true     # 是否是样例，不写此字段则默认为 false，如果是样例则导出时会自动放进 statement/down 里
     depend: []       # 一个列表，表示依赖的子任务编号（从 1 开始），如果列表中任意一个子任务不是满分则此子任务自动记为 0 分
-
+```

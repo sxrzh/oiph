@@ -186,4 +186,4 @@ WebUI 界面、Polygon API、各种兼容导出 先不写，先写一个 CLI 实
 std、sols 只需要考虑 C++ 程序，generator、validator、checker、interactive_lib 统一用 C++ 基于 testlib 编写。
 比赛和题目的数据存储在本地文件，配置存储在（比赛/题目）对应目录下的 config.yaml
 
-agent 的架构可以参考 simple-agent 目录
+agent 的架构可以参考 ref/simple-agent 目录

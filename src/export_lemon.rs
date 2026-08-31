@@ -29,10 +29,12 @@ pub fn export(contest_dir: &Path, output_dir: Option<&Path>) -> Result<PathBuf> 
 
     let mut tasks = Vec::new();
     let mut spj_dirs: Vec<String> = Vec::new();
+    let source_dir = out.join("source");
+    let std_dir = source_dir.join("std");
 
     for pid in &contest.problems {
         let problem = project::load_problem(&project::problem_dir(contest_dir, pid))?;
-        let task = build_task(&problem, contest_dir, &data_dir, &mut spj_dirs)?;
+        let task = build_task(&problem, contest_dir, &data_dir, &std_dir, &mut spj_dirs)?;
         tasks.push(task);
     }
 
@@ -63,6 +65,7 @@ fn build_task(
     problem: &Problem,
     contest_dir: &Path,
     data_dir: &Path,
+    std_dir: &Path,
     spj_dirs: &mut Vec<String>,
 ) -> Result<Value> {
     let pid = &problem.id;
@@ -77,6 +80,16 @@ fn build_task(
     let down_dir = project::problem_dir(contest_dir, pid).join("statement").join("down");
     if down_dir.exists() {
         copy_dir_contents(&down_dir, &pdata_dir)?;
+    }
+
+    // 拷贝 std 到 source/std/<pid>/<pid>.cpp
+    let pdir = project::problem_dir(contest_dir, pid);
+    let std_src = problem.std.file.as_deref().unwrap_or("solutions/std.cpp");
+    let std_path = pdir.join(std_src);
+    if std_path.exists() {
+        let std_subdir = std_dir.join(pid);
+        std::fs::create_dir_all(&std_subdir)?;
+        std::fs::copy(&std_path, std_subdir.join(format!("{pid}.cpp")))?;
     }
 
     // 判断是否有 SPJ
@@ -147,7 +160,7 @@ fn build_task(
         "specialJudge": special_judge,
         "standardInputCheck": true,
         "standardOutputCheck": true,
-        "subFolderCheck": false,
+        "subFolderCheck": true,
         "taskType": task_type,
         "testCases": test_cases,
     });

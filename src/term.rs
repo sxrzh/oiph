@@ -52,6 +52,33 @@ pub fn print_content(text: &str) {
     print_out(text);
 }
 
+/// 打印思维链。过长时只显示最后 300 字符，前面用 ... 替代。
+/// 输出到 stderr（不干扰 stdout 内容流），加灰色前缀。
+use std::sync::Mutex;
+static REASONING_BUF: Mutex<String> = Mutex::new(String::new());
+
+pub fn reset_reasoning_buf() {
+    if let Ok(mut buf) = REASONING_BUF.lock() {
+        buf.clear();
+    }
+    // 清除行
+    print_err("\r\x1b[K");
+}
+
+pub fn print_reasoning(text: &str) {
+    let mut buf = REASONING_BUF.lock().unwrap();
+    buf.push_str(text);
+    let len = buf.chars().count();
+    let display: String = if len > 300 {
+        format!("...{}", buf.chars().skip(len - 300).collect::<String>())
+    } else {
+        buf.clone()
+    };
+    // 回车到行首覆盖
+    print_err("\r");
+    print_err(&format!("\x1b[2m[思维链] {}\x1b[0m\r", display.chars().take(200).collect::<String>()));
+}
+
 // ---------------------------------------------------------------------------
 // CancelFlag
 // ---------------------------------------------------------------------------

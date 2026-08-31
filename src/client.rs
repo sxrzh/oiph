@@ -208,6 +208,7 @@ impl Client {
         tools: &[Tool],
         cancel: &CancelFlag,
         on_content: fn(&str),
+        on_reasoning: fn(&str),
     ) -> Result<ChatResult> {
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
         let body = ChatRequest {
@@ -222,7 +223,7 @@ impl Client {
         let resp = self.send_with_retry(&url, &body).await?;
 
         // Phase 2: 流式读取 SSE（含打断）
-        self.stream_response(resp, cancel, on_content).await
+        self.stream_response(resp, cancel, on_content, on_reasoning).await
     }
 
     /// 发送请求，含指数退避重试（网络错误 / 429 / 5xx）。
@@ -276,6 +277,7 @@ impl Client {
         resp: reqwest::Response,
         cancel: &CancelFlag,
         on_content: fn(&str),
+        on_reasoning: fn(&str),
     ) -> Result<ChatResult> {
         let mut stream = resp.bytes_stream();
         let mut buf = String::new();
@@ -309,6 +311,7 @@ impl Client {
                                                     }
                                                     if let Some(r) = &choice.delta.reasoning {
                                                         reasoning.push_str(r);
+                                                        on_reasoning(r);
                                                     }
                                                     if let Some(tcs) = &choice.delta.tool_calls {
                                                         for tc in tcs {

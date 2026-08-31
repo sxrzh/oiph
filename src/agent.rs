@@ -36,6 +36,7 @@ pub struct AgentDeps<'a> {
 pub struct TurnResult {
     pub text: String,
     pub interrupted: bool,
+    #[allow(dead_code)]
     pub usage: Option<ChatUsage>,
 }
 
@@ -296,7 +297,11 @@ pub async fn run_turn(
 ) -> Result<TurnResult> {
     let tool_defs = definitions_for(role);
     let on_content: fn(&str) = if stream_output { term::print_content } else { term::noop };
+    let on_reasoning: fn(&str) = if stream_output { term::print_reasoning } else { term::noop };
     let mut total_usage: Option<ChatUsage> = None;
+    // searching-agent 的搜索调用计数（web_search + fetch_url），超过上限则停止
+    let mut search_call_count: u32 = 0;
+    const SEARCH_LIMIT: u32 = 30;
 
     for step in 1..=deps.max_steps {
         if cancel.is_cancelled() {
@@ -305,6 +310,11 @@ pub async fn run_turn(
                 interrupted: true,
                 usage: total_usage,
             });
+        }
+
+        // 重置思维链缓冲
+        if stream_output {
+            term::reset_reasoning_buf();
         }
 
         term::println_err(&format!(
@@ -319,7 +329,7 @@ pub async fn run_turn(
 
         let result = deps
             .client
-            .chat_stream(deps.model, messages, &tool_defs, cancel, on_content)
+            .chat_stream(deps.model, messages, &tool_defs, cancel, on_content, on_reasoning)
             .await?;
 
         // 累加 usage
@@ -341,6 +351,11 @@ pub async fn run_turn(
                 }
                 None => u.clone(),
             });
+        }
+
+        // 每步结束后实时显示累计用量
+        if let Some(acc) = &total_usage {
+            term::println_err(&crate::client::format_usage(deps.model, acc));
         }
 
         if result.interrupted {
@@ -392,8 +407,27 @@ pub async fn run_turn(
                     "_raw_arguments": args_raw,
                 })
             });
+
+            // searching-agent 搜索次数限制
+            if role == Role::Searching && (name == "web_search" || name == "fetch_url") {
+                search_call_count += 1;
+                if search_call_count > SEARCH_LIMIT {
+                    term::println_err(&format!(
+                        "搜索次数已达上限 {SEARCH_LIMIT}，停止搜索"
+                    ));
+                    let result = format!(
+                        "已达搜索上限（{SEARCH_LIMIT} 次网络请求）。请停止搜索，\
+向 supervisor 报告未能找到的资源（std、测试数据、辅助程序等），\
+由 solution-agent / auxiliary-agent 自行编写。\
+在最终回答中列出已找到的资源和未找到的部分。"
+                    );
+                    messages.push(Message::tool(result, call.id.clone()));
+                    continue;
+                }
+            }
+
             term::println_err(&format!("工具调用：{name}({})", args_summary(&args)));
-            let dispatch_result = Box::pin(dispatch(role, app, &ctx, deps, name, &args)).await;
+            let dispatch_result = Box::pin(dispatch(role, app, &ctx, deps, cancel, name, &args)).await;
             term::println_err(&format!("-> {}", summary_line(&dispatch_result)));
             messages.push(Message::tool(dispatch_result, call.id.clone()));
         }
@@ -445,6 +479,7 @@ pub async fn dispatch(
     app: &App,
     ctx: &ToolContext,
     deps: &AgentDeps<'_>,
+    cancel: &CancelFlag,
     name: &str,
     args: &Value,
 ) -> String {
@@ -458,10 +493,10 @@ pub async fn dispatch(
             "check_data" => Some(tool_check(ctx, args, "data").await),
             "check_std" => Some(tool_check(ctx, args, "std").await),
             "check_solutions" => Some(tool_check(ctx, args, "sols").await),
-            "call_searching_agent" => Some(call_sub_agent(Role::Searching, app, ctx, deps, args).await),
-            "call_statement_agent" => Some(call_sub_agent(Role::Statement, app, ctx, deps, args).await),
-            "call_solution_agent" => Some(call_sub_agent(Role::Solution, app, ctx, deps, args).await),
-            "call_auxiliary_agent" => Some(call_sub_agent(Role::Auxiliary, app, ctx, deps, args).await),
+            "call_searching_agent" => Some(call_sub_agent(Role::Searching, app, ctx, deps, cancel, args).await),
+            "call_statement_agent" => Some(call_sub_agent(Role::Statement, app, ctx, deps, cancel, args).await),
+            "call_solution_agent" => Some(call_sub_agent(Role::Solution, app, ctx, deps, cancel, args).await),
+            "call_auxiliary_agent" => Some(call_sub_agent(Role::Auxiliary, app, ctx, deps, cancel, args).await),
             _ => None,
         };
         if let Some(r) = r {
@@ -503,14 +538,11 @@ async fn tool_create_contest(app: &App, ctx: &ToolContext, args: &Value) -> Stri
     if project::is_contest_dir(&ctx.workdir) {
         return "[错误] 当前工作目录已是比赛工程目录，无需重复创建".into();
     }
-    let dir = ctx.workdir.join(&name);
-    if dir.exists() {
-        return format!("[错误] 目录 {} 已存在", dir.display());
-    }
+    let dir = ctx.workdir.clone();
     match project::init_contest(&dir, &name) {
         Ok(_) => {
             app.set_contest_dir(Some(dir.clone()));
-            format!("已创建比赛工程：{}（目录：{}）", name, dir.display())
+            format!("已在当前目录创建比赛工程：{}（目录：{}）", name, dir.display())
         }
         Err(e) => err_str(e),
     }
@@ -842,6 +874,7 @@ async fn call_sub_agent(
     app: &App,
     ctx: &ToolContext,
     deps: &AgentDeps<'_>,
+    cancel: &CancelFlag,
     args: &Value,
 ) -> String {
     let task = match tools::get_str(args, "task") {
@@ -885,7 +918,7 @@ async fn call_sub_agent(
         Some(&contest_dir),
         &mut messages,
         false, // 子 Agent 不实时打印内容
-        &CancelFlag::new(), // 子 Agent 内部不支持打断（由 supervisor 的 cancel 间接生效）
+        cancel, // 透传 supervisor 的打断信号
     )
     .await;
 
@@ -1052,76 +1085,27 @@ mod tests {
         let app = test_app(root.clone());
         let client = Client::new("http://localhost:1/v1".into(), "k".into()).unwrap();
         let d = deps(&client);
+        let cancel = term::CancelFlag::new();
         let ctx = app.tool_ctx(&root);
 
-        // create_contest（workdir=root，创建后切换 current）
-        let out = dispatch(
-            Role::Supervisor,
-            &app,
-            &ctx,
-            &d,
-            "create_contest",
-            &serde_json::json!({"name": "mycontest"}),
-        )
-        .await;
-        assert!(out.contains("已创建"), "got: {out}");
-        assert_eq!(app.contest_dir(), Some(root.join("mycontest")));
-        let cdir = root.join("mycontest");
+        let out = dispatch(Role::Supervisor, &app, &ctx, &d, &cancel, "create_contest", &serde_json::json!({"name": "mycontest"})).await;
+        assert!(out.contains("创建比赛"), "got: {out}");
+        assert_eq!(app.contest_dir(), Some(root.clone()));
+        let cdir = root.clone();
         let cctx = app.tool_ctx(&cdir);
 
-        // add_problem
-        let out = dispatch(
-            Role::Supervisor,
-            &app,
-            &cctx,
-            &d,
-            "add_problem",
-            &serde_json::json!({"id": "a", "name": "A+B", "problem_type": "traditional", "source": "original"}),
-        )
-        .await;
+        let out = dispatch(Role::Supervisor, &app, &cctx, &d, &cancel, "add_problem", &serde_json::json!({"id": "a", "name": "A+B", "problem_type": "traditional", "source": "original"})).await;
         assert!(out.contains("已添加题目"), "got: {out}");
 
-        // add_solution
-        let out = dispatch(
-            Role::Supervisor,
-            &app,
-            &cctx,
-            &d,
-            "add_solution",
-            &serde_json::json!({"name": "brute", "expected_verdict": "WA", "expected_score": 30.0}),
-        )
-        .await;
+        let out = dispatch(Role::Supervisor, &app, &cctx, &d, &cancel, "add_solution", &serde_json::json!({"name": "brute", "expected_verdict": "WA", "expected_score": 30.0})).await;
         assert!(out.contains("已登记解法"), "got: {out}");
 
-        // check_std
-        let out = dispatch(
-            Role::Supervisor,
-            &app,
-            &cctx,
-            &d,
-            "check_std",
-            &serde_json::json!({"problem": "a"}),
-        )
-        .await;
+        let out = dispatch(Role::Supervisor, &app, &cctx, &d, &cancel, "check_std", &serde_json::json!({"problem": "a"})).await;
         assert!(out.contains("检查通过"), "got: {out}");
 
-        // duplicate_check（会发起网络请求，CI 环境可能失败）
-        let out = dispatch(
-            Role::Supervisor,
-            &app,
-            &cctx,
-            &d,
-            "duplicate_check",
-            &serde_json::json!({"problem": "a", "title": "A+B"}),
-        )
-        .await;
-        // 网络可用时返回查重结果；不可用时返回请求失败信息
-        assert!(
-            out.contains("查重") || out.contains("失败"),
-            "got: {out}"
-        );
+        let out = dispatch(Role::Supervisor, &app, &cctx, &d, &cancel, "duplicate_check", &serde_json::json!({"problem": "a", "title": "A+B"})).await;
+        assert!(out.contains("查重") || out.contains("失败"), "got: {out}");
 
-        // status reflects completed std
         let p = project::load_problem(&cdir.join("a")).unwrap();
         assert!(p.std.status.is_terminal_ok());
         assert!(p.duplicate_check.is_some());
@@ -1136,8 +1120,9 @@ mod tests {
         let app = test_app(root.clone());
         let client = Client::new("http://localhost:1/v1".into(), "k".into()).unwrap();
         let d = deps(&client);
+        let cancel = term::CancelFlag::new();
         let ctx = app.tool_ctx(&root);
-        let out = dispatch(Role::Supervisor, &app, &ctx, &d, "check_data", &serde_json::json!({})).await;
+        let out = dispatch(Role::Supervisor, &app, &ctx, &d, &cancel, "check_data", &serde_json::json!({})).await;
         assert!(out.contains("错误"), "got: {out}");
         std::fs::remove_dir_all(&root).ok();
     }

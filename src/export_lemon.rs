@@ -122,12 +122,12 @@ fn build_task(
             std::fs::copy(&lib_path, &dst)?;
             grader = json!(format!("{pid}/grader.cpp"));
         }
-        // 如果有 inter.h
-        let inter_h = aux_dir.join("inter.h");
+        // 如果有 {pid}.h
+        let inter_h = aux_dir.join(format!("{pid}.h"));
         if inter_h.exists() {
-            std::fs::copy(&inter_h, pdata_dir.join("inter.h"))?;
-            interactor = json!(format!("{pid}/inter.h"));
-            interactor_name = json!("inter.h");
+            std::fs::copy(&inter_h, pdata_dir.join(format!("{pid}.h")))?;
+            interactor = json!(format!("{pid}/{pid}.h"));
+            interactor_name = json!(format!("{pid}.h"));
         }
     }
 
@@ -470,7 +470,7 @@ mod tests {
         let pdir = project::problem_dir(&dir, "c");
         std::fs::create_dir_all(pdir.join("auxiliary")).unwrap();
         std::fs::write(pdir.join("auxiliary").join("interactive_lib.cpp"), "int main(){}").unwrap();
-        std::fs::write(pdir.join("auxiliary").join("inter.h"), "#pragma once").unwrap();
+        std::fs::write(pdir.join("auxiliary").join(format!("c.h")), "#pragma once").unwrap();
 
         let out = export(&dir, None).unwrap();
         let cdf: Value = serde_json::from_str(
@@ -479,10 +479,10 @@ mod tests {
         .unwrap();
         assert_eq!(cdf["tasks"][0]["taskType"], 2);
         assert_eq!(cdf["tasks"][0]["grader"], "c/grader.cpp");
-        assert_eq!(cdf["tasks"][0]["interactor"], "c/inter.h");
-        assert_eq!(cdf["tasks"][0]["interactorName"], "inter.h");
+        assert_eq!(cdf["tasks"][0]["interactor"], "c/c.h");
+        assert_eq!(cdf["tasks"][0]["interactorName"], "c.h");
         assert!(out.join("data").join("c").join("grader.cpp").is_file());
-        assert!(out.join("data").join("c").join("inter.h").is_file());
+        assert!(out.join("data").join("c").join("c.h").is_file());
 
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&out).ok();

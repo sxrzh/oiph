@@ -26,12 +26,13 @@ mod term;
 mod tools;
 
 use std::collections::VecDeque;
-use std::io::{self, IsTerminal, Read, Write};
+use std::io::{self, IsTerminal, Read};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use anyhow::{Context, Result, anyhow, bail};
 use clap::{Parser, Subcommand};
+use rustyline::Editor;
 use serde::{Deserialize, Serialize};
 
 use agent::Role;
@@ -602,10 +603,12 @@ async fn run_repl(cli: &Cli, root: &Path) -> Result<()> {
         }
     }
 
+    let mut rl = new_editor();
+
     loop {
         let line = match pending.pop_front() {
             Some(t) => t,
-            None if tty => match repl_readline()? {
+            None if tty => match repl_readline(&mut rl)? {
                 Some(l) => l,
                 None => break,
             },
@@ -675,10 +678,6 @@ async fn run_repl(cli: &Cli, root: &Path) -> Result<()> {
                 }
                 // 打印换行分隔
                 println!();
-                // 打印 Token 用量
-                if let Some(usage) = &turn_result.usage {
-                    term::println_err(&client::format_usage(&app.model, usage));
-                }
             }
             Err(e) => {
                 term::println_err(&format!("\n⚠ LLM 调用失败（已重试 5 次）：{e:#}"));
@@ -689,10 +688,10 @@ async fn run_repl(cli: &Cli, root: &Path) -> Result<()> {
         save_current_session(&app, &messages, &mut current_session);
     }
 
+    // 保存历史
+    let _ = rl.save_history(&dirs_for_history());
     Ok(())
 }
-
-/// 保存当前会话；若尚无会话名则自动新建一个。
 fn save_current_session(app: &App, messages: &[Message], current_session: &mut Option<String>) {
     let Some(cdir) = app.contest_dir() else {
         return;
@@ -849,15 +848,14 @@ async fn handle_slash_contest(app: &App, root: &Path, args: &[&str]) {
             }
         }
         ["new", name] => {
-            let dir = root.join(name);
-            match project::init_contest(&dir, name) {
+            if project::is_contest_dir(root) {
+                eprintln!("错误：当前目录已是比赛工程目录");
+                return;
+            }
+            match project::init_contest(root, name) {
                 Ok(_) => {
-                    app.set_contest_dir(Some(dir.clone()));
-                    let ws = WorkspaceState {
-                        current_contest: Some(name.to_string()),
-                    };
-                    let _ = save_ws_state(root, &ws);
-                    println!("已创建比赛 {name}：{}", dir.display());
+                    app.set_contest_dir(Some(root.to_path_buf()));
+                    println!("已在当前目录创建比赛 {name}：{}", root.display());
                 }
                 Err(e) => eprintln!("错误：{e:#}"),
             }
@@ -1112,16 +1110,35 @@ fn read_all_stdin() -> Result<String> {
     Ok(buf)
 }
 
-fn repl_readline() -> Result<Option<String>> {
-    print!("\n>> ");
-    io::stdout().flush()?;
-    let mut line = String::new();
-    let n = io::stdin().read_line(&mut line)?;
-    if n == 0 {
-        return Ok(None);
+/// rustyline 编辑器（多字节安全、历史记录）。
+fn new_editor() -> Editor<(), rustyline::history::FileHistory> {
+    let mut rl: Editor<(), rustyline::history::FileHistory> = Editor::new().unwrap_or_else(|_| {
+        let config = rustyline::Config::builder().build();
+        rustyline::Editor::with_config(config).unwrap()
+    });
+    let hist = dirs_for_history();
+    let _ = rl.load_history(&hist);
+    rl
+}
+
+fn dirs_for_history() -> std::path::PathBuf {
+    let home = std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir);
+    home.join(".oiph").join("history.txt")
+}
+
+fn repl_readline(rl: &mut Editor<(), rustyline::history::FileHistory>) -> Result<Option<String>> {
+    match rl.readline(">> ") {
+        Ok(line) => {
+            let trimmed = line.trim().to_string();
+            if !trimmed.is_empty() {
+                rl.add_history_entry(&line).ok();
+            }
+            Ok(Some(trimmed))
+        }
+        Err(rustyline::error::ReadlineError::Eof) => Ok(None),
+        Err(rustyline::error::ReadlineError::Interrupted) => Ok(Some(String::new())),
+        Err(e) => Err(anyhow!("读取输入失败：{e}")),
     }
-    let line = line.trim().to_string();
-    Ok(Some(line))
 }
 
 #[cfg(test)]

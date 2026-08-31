@@ -5,12 +5,11 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result, anyhow, bail};
 
 use crate::model::{
-    Component, ComponentStatus, Contest, DataConfig, DuplicateCheckResult, GetStatus, Problem,
+    Component, ComponentStatus, Contest, DuplicateCheckResult, GetStatus, Problem,
     ProblemSource, ProblemType, SolutionStatus,
 };
 
 pub const CONFIG_NAME: &str = "config.yaml";
-pub const DATA_CONFIG_NAME: &str = "config.yaml";
 
 // ---------------------------------------------------------------------------
 // 路径
@@ -22,10 +21,6 @@ pub fn contest_config_path(contest_dir: &Path) -> PathBuf {
 
 pub fn problem_dir(contest_dir: &Path, id: &str) -> PathBuf {
     contest_dir.join(id)
-}
-
-pub fn data_config_path(contest_dir: &Path, id: &str) -> PathBuf {
-    problem_dir(contest_dir, id).join("data").join(DATA_CONFIG_NAME)
 }
 
 pub fn is_contest_dir(dir: &Path) -> bool {
@@ -139,13 +134,7 @@ pub fn add_problem(contest_dir: &Path, req: NewProblem) -> Result<Problem> {
         std::fs::create_dir_all(pdir.join(sub))
             .with_context(|| format!("创建 {} 失败", sub))?;
     }
-    // 空 data/config.yaml
-    let data_cfg = DataConfig::default();
-    std::fs::write(
-        data_config_path(contest_dir, pid),
-        serde_yaml::to_string(&data_cfg)?,
-    )
-    .with_context(|| "写入 data/config.yaml 失败")?;
+    // subtasks 与 data_gen 在 problem config.yaml 中（subtasks 默认空列表）
     save_problem(&pdir, &problem)?;
 
     // 更新比赛 problem 列表
@@ -519,9 +508,13 @@ mod tests {
         assert!(d.join("a").join("statement").is_dir());
         assert!(d.join("a").join("statement").join("down").is_dir());
         assert!(d.join("a").join("data").is_dir());
-        assert!(d.join("a").join("data").join("config.yaml").is_file());
+        assert!(!d.join("a").join("data").join("config.yaml").exists()); // subtasks 在题目 config.yaml 中
         assert!(d.join("a").join("auxiliary").is_dir());
         assert!(d.join("a").join("solutions").is_dir());
+        // subtasks 与 data_gen 在题目 config.yaml 中
+        let loaded_p = load_problem(&d.join("a")).unwrap();
+        assert!(loaded_p.subtasks.is_empty());
+        assert!(loaded_p.data_gen.is_empty());
         let loaded = load_contest(&d).unwrap();
         assert_eq!(loaded.problems, vec!["a"]);
         assert_eq!(loaded.loaded_problems.len(), 1);

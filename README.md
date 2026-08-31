@@ -105,6 +105,22 @@ description: OI 题目对拍：用暴力解与被测程序对比找反例，限�
 - 每轮对话后自动保存；`/session new|use` 切换前也会保存当前会话
 - `preparer session export` 或 `/session export` 可导出为 markdown
 
+## 导出
+
+```sh
+# 导出为 LemonLime 格式
+./target/debug/preparer export lemon [输出目录]
+
+# 默认输出到 <比赛目录>/<比赛名>_lemon/
+```
+
+LemonLime 导出内容包括：
+- `<比赛名>.cdf`：比赛配置 JSON（含 subtasks、依赖、SPJ 配置等）
+- `data/<题目id>/`：测试数据文件（.in/.ans）
+- `data/<题目id>/spj.cpp` + `testlib.h`：SPJ（checker）使用 LemonLime 兼容的 testlib.h
+- `data/<题目id>/grader.cpp` + `inter.h`：交互题 grader 与交互库头文件
+- `compile_spj.bat`：编译所有 SPJ 的批处理脚本（Windows g++）
+
 ## 工程目录与配置
 
 见 FILES.md。比赛与题目的数据存本地文件，配置存对应目录的 `config.yaml`；组件状态实现 `GetStatus` trait（见 src/model.rs）。
@@ -112,7 +128,7 @@ description: OI 题目对拍：用暴力解与被测程序对比找反例，限�
 ## 未实现（桩）
 
 - 数据 / std / 解法检查 `check_data` / `check_std` / `check_solutions`：统一返回通过（后续接入 tuack-ng）
-- Web UI、Polygon API、各 OJ 格式导出
+- Web UI、Polygon API、其他 OJ 格式导出（SYZOJ/HydroOJ 等）
 
 ## 查重（原题查找）
 

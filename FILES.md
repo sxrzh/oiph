@@ -14,12 +14,11 @@ contest_name
             - down
                 - 下发文件（交互库等）
         - data
-            - config.yaml    # 测试点配置（subtasks 列表）
             - 1.in
             - 1.ans
-            - ...            # 或：generator.cpp（生成器）
+            - ...            # 测试数据文件（生成的或静态的）
         - auxiliary
-            - generator.cpp
+            - generator.cpp  # 数据生成器（始终在 auxiliary/ 下）
             - validator.cpp
             - checker.cpp
             - interactive_lib.cpp（如需要）
@@ -55,6 +54,8 @@ contest_name
 - `source`：`original`（原创）| `moved`（搬运）| `adapted`（改编）
 - `tags`：知识点标签列表
 - `time_limit_ms` / `memory_limit_mb` / `compile_flags`：评测参数
+- `subtasks`：测试点配置列表（见下）
+- `data_gen`：数据生成参数 map，key 为测试点名称，value 为 generator 命令行参数
 - 各组件状态（见下）：`statement`、`std`、`sols`、`data`、`validator`、`checker`、`interactive_lib`、`tutorial`
 - `duplicate_check`：查重结果（`found`/`matches`/`checked_at`/`note`）
 - `files`：各组件相对路径
@@ -81,14 +82,27 @@ sols:
       state: not_started
 ```
 
-### data/config.yaml（测试点配置）
+### subtasks（在题目 config.yaml 中）
 
 ```yaml
 subtasks:
   - score: 30        # 分数
     type: sum        # 子任务计分方式，包括 sum, min, mul
-    cases: [1, 2]    # 测试点编号列表
+    cases: [1, 2]    # 测试点名称列表
     pretest: true    # 是否是 pretest，不写此字段则默认为 false
     sample: true     # 是否是样例，不写此字段则默认为 false，如果是样例则导出时会自动放进 statement/down 里
     depend: []       # 一个列表，表示依赖的子任务编号（从 1 开始），如果列表中任意一个子任务不是满分则此子任务自动记为 0 分
+```
+
+### data_gen（在题目 config.yaml 中）
+
+数据生成参数 map。key 为测试点名称（subtasks.cases 中的项），value 为 generator 的命令行参数。
+生成数据时，若测试点在 data_gen 的 key 中，执行 `<auxiliary/generator> <value>` 生成该测试点输入；
+不在 data_gen 中的测试点视为已有静态数据文件。
+
+```yaml
+data_gen:
+  "1": "-small"
+  "2": "-big"
+  "hack": "-hack"
 ```

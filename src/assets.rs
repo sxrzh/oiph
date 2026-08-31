@@ -6,6 +6,9 @@
 
 pub const TESTLIB_H: &str = include_str!("../assets/auxiliary/testlib.h");
 
+/// LemonLime 兼容的 testlib.h（含 `TESTLIB_FOR_LEMONS` 定义）。
+pub const LEMON_TESTLIB_H: &str = include_str!("../assets/lemon/testlib.h");
+
 /// 内置知识库文档：(文件名, 内容)。
 pub const KB_DOCS: &[(&str, &str)] = &[
     (

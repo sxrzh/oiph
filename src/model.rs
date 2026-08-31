@@ -394,6 +394,13 @@ pub struct Problem {
     pub memory_limit_mb: u64,
     #[serde(default = "Problem::def_compile_flags")]
     pub compile_flags: String,
+    /// 测试点配置（subtasks 列表）。
+    #[serde(default)]
+    pub subtasks: Vec<Subtask>,
+    /// 数据生成参数：key 为测试点名称（subtasks.cases 中的项），
+    /// value 为 generator 命令行参数。生成时执行 `<generator> <value>`。
+    #[serde(default)]
+    pub data_gen: std::collections::BTreeMap<String, String>,
     #[serde(default)]
     pub statement: ComponentStatus,
     #[serde(default = "Problem::def_std")]
@@ -478,6 +485,8 @@ impl Default for Problem {
             time_limit_ms: Self::def_time_limit(),
             memory_limit_mb: Self::def_memory_limit(),
             compile_flags: Self::def_compile_flags(),
+            subtasks: Vec::new(),
+            data_gen: std::collections::BTreeMap::new(),
             statement: ComponentStatus::NotStarted,
             std: Self::def_std(),
             sols: Vec::new(),
@@ -582,7 +591,7 @@ impl GetStatus for Contest {
 }
 
 // ---------------------------------------------------------------------------
-// 测试点配置（data/config.yaml）
+// 测试点配置（放在题目 config.yaml 的 subtasks 字段中）
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -594,7 +603,6 @@ pub enum SubtaskType {
     Min,
     Mul,
 }
-
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Subtask {
@@ -609,12 +617,6 @@ pub struct Subtask {
     pub sample: bool,
     #[serde(default)]
     pub depend: Vec<u32>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct DataConfig {
-    #[serde(default)]
-    pub subtasks: Vec<Subtask>,
 }
 
 #[cfg(test)]

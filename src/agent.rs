@@ -6,7 +6,7 @@ use anyhow::{Result, anyhow};
 use chrono::Utc;
 use serde_json::Value;
 
-use crate::client::{Client, FunctionDef, Message, Tool};
+use crate::client::{ChatUsage, Client, FunctionDef, Message, Tool};
 use crate::model::{
     ComponentStatus, DuplicateCheckResult, JudgingStatus, ProblemSource, ProblemType,
     SolutionStatus, Verdict,
@@ -14,6 +14,7 @@ use crate::model::{
 use crate::project;
 use crate::prompts;
 use crate::state::App;
+use crate::term::{self, CancelFlag};
 use crate::tools::{self, ToolContext};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -29,6 +30,13 @@ pub struct AgentDeps<'a> {
     pub client: &'a Client,
     pub model: &'a str,
     pub max_steps: usize,
+}
+
+/// 单轮 Agent 的结果。
+pub struct TurnResult {
+    pub text: String,
+    pub interrupted: bool,
+    pub usage: Option<ChatUsage>,
 }
 
 // ---------------------------------------------------------------------------
@@ -271,38 +279,86 @@ pub fn system_message_for(role: Role, app: &App) -> Message {
 // ---------------------------------------------------------------------------
 
 /// 运行一个 Agent 的对话回合：调用模型、执行工具调用，直到模型给出最终回答。
-/// 返回最终文本。消息原地追加，跨回合累积。
+/// 消息原地追加，跨回合累积。
 ///
-/// - supervisor：工作目录动态取 App 的当前比赛目录（无则 root），
-///   这样 create_contest 后本回合内即可在新比赛中继续操作。
+/// - supervisor：工作目录动态取 App 的当前比赛目录（无则 root）。
 /// - 子 Agent：使用固定的 `fixed_workdir`（比赛目录）。
+/// - `stream_output`：是否实时打印模型输出内容（supervisor 为 true，子 Agent 为 false）。
+/// - `cancel`：打断标志（双 Esc 触发）。
 pub async fn run_turn(
     deps: &AgentDeps<'_>,
     app: &App,
     role: Role,
     fixed_workdir: Option<&Path>,
     messages: &mut Vec<Message>,
-) -> Result<String> {
+    stream_output: bool,
+    cancel: &CancelFlag,
+) -> Result<TurnResult> {
     let tool_defs = definitions_for(role);
+    let on_content: fn(&str) = if stream_output { term::print_content } else { term::noop };
+    let mut total_usage: Option<ChatUsage> = None;
+
     for step in 1..=deps.max_steps {
-        eprintln!("--- [{}] step {step}: 调用模型 ---", prompts::role_name(role));
+        if cancel.is_cancelled() {
+            return Ok(TurnResult {
+                text: String::new(),
+                interrupted: true,
+                usage: total_usage,
+            });
+        }
+
+        term::println_err(&format!(
+            "--- [{}] step {step}: 调用模型 ---",
+            prompts::role_name(role)
+        ));
         let workdir = match fixed_workdir {
             Some(w) => w.to_path_buf(),
-            None => app
-                .contest_dir()
-                .unwrap_or_else(|| app.root.clone()),
+            None => app.contest_dir().unwrap_or_else(|| app.root.clone()),
         };
         let ctx = app.tool_ctx(&workdir);
 
-        let response = deps.client.chat(deps.model, messages, &tool_defs).await?;
+        let result = deps
+            .client
+            .chat_stream(deps.model, messages, &tool_defs, cancel, on_content)
+            .await?;
 
-        let Some(choice) = response.choices.into_iter().next() else {
-            anyhow::bail!("模型未返回任何 choice");
-        };
-        let mut assistant_msg = choice.message;
+        // 累加 usage
+        if let Some(u) = &result.usage {
+            total_usage = Some(match &mut total_usage {
+                Some(acc) => {
+                    acc.prompt_tokens += u.prompt_tokens;
+                    acc.completion_tokens += u.completion_tokens;
+                    acc.total_tokens += u.total_tokens;
+                    acc.cache_hit_tokens = match (acc.cache_hit_tokens, u.cache_hit_tokens) {
+                        (Some(a), Some(b)) => Some(a + b),
+                        (a, b) => a.or(b),
+                    };
+                    acc.cache_miss_tokens = match (acc.cache_miss_tokens, u.cache_miss_tokens) {
+                        (Some(a), Some(b)) => Some(a + b),
+                        (a, b) => a.or(b),
+                    };
+                    acc.clone()
+                }
+                None => u.clone(),
+            });
+        }
+
+        if result.interrupted {
+            // 用户打断：保留已产生的 assistant 消息（content + tool_calls），但不包含 reasoning
+            let mut msg = result.message;
+            msg.reasoning = None;
+            messages.push(msg);
+            return Ok(TurnResult {
+                text: String::new(),
+                interrupted: true,
+                usage: total_usage,
+            });
+        }
+
+        let mut assistant_msg = result.message;
         if let Some(r) = assistant_msg.reasoning.as_deref()
             && !r.is_empty() {
-                eprintln!("（思维链 {} 字符，不进入历史）", r.len());
+                term::println_err(&format!("（思维链 {} 字符，不进入历史）", r.len()));
             }
         assistant_msg.reasoning = None;
 
@@ -311,12 +367,23 @@ pub async fn run_turn(
         if tool_calls.is_empty() {
             let text = assistant_msg.content.clone().unwrap_or_default();
             messages.push(assistant_msg);
-            return Ok(text);
+            return Ok(TurnResult {
+                text,
+                interrupted: false,
+                usage: total_usage,
+            });
         }
 
         messages.push(assistant_msg);
 
         for call in &tool_calls {
+            if cancel.is_cancelled() {
+                return Ok(TurnResult {
+                    text: String::new(),
+                    interrupted: true,
+                    usage: total_usage,
+                });
+            }
             let name = &call.function.name;
             let args_raw = &call.function.arguments;
             let args: Value = serde_json::from_str(args_raw).unwrap_or_else(|e| {
@@ -325,10 +392,10 @@ pub async fn run_turn(
                     "_raw_arguments": args_raw,
                 })
             });
-            eprintln!("工具调用：{name}({})", args_summary(&args));
-            let result = Box::pin(dispatch(role, app, &ctx, deps, name, &args)).await;
-            eprintln!("-> {}", summary_line(&result));
-            messages.push(Message::tool(result, call.id.clone()));
+            term::println_err(&format!("工具调用：{name}({})", args_summary(&args)));
+            let dispatch_result = Box::pin(dispatch(role, app, &ctx, deps, name, &args)).await;
+            term::println_err(&format!("-> {}", summary_line(&dispatch_result)));
+            messages.push(Message::tool(dispatch_result, call.id.clone()));
         }
     }
 
@@ -811,12 +878,25 @@ async fn call_sub_agent(
         )),
     ];
 
-    let outcome = run_turn(deps, app, role, Some(&contest_dir), &mut messages).await;
+    let outcome = run_turn(
+        deps,
+        app,
+        role,
+        Some(&contest_dir),
+        &mut messages,
+        false, // 子 Agent 不实时打印内容
+        &CancelFlag::new(), // 子 Agent 内部不支持打断（由 supervisor 的 cancel 间接生效）
+    )
+    .await;
 
     let (final_text, ok) = match outcome {
-        Ok(t) => {
-            let ok = parse_result(&t);
-            (t, ok)
+        Ok(result) => {
+            if result.interrupted {
+                ("（子 Agent 被打断）".into(), false)
+            } else {
+                let ok = parse_result(&result.text);
+                (result.text, ok)
+            }
         }
         Err(e) => (format!("子 Agent 出错：{e:#}"), false),
     };

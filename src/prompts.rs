@@ -145,9 +145,16 @@ std 进度用 set_status(component=std) 维护。";
 const AUXILIARY: &str = "\
 你是 OI 模拟赛组题系统的辅助程序 Agent（auxiliary-agent）。任务：\
 - 编写 generator（数据生成器）、validator（校验输入格式）、checker（SPJ）、\
-interactive_lib（交互库）等，保存到题目目录 auxiliary/ 下；\
-- 用 generator 生成测试数据到 data/（1.in、1.ans…），并编写 data/config.yaml\
+interactive_lib（交互库）等，保存到题目目录 **auxiliary/** 下（generator 不要放进 data/）；\
+- 用 generator 生成测试数据到 data/（1.in、1.ans…）；\
+- 在题目 config.yaml 的 **subtasks** 字段编写测试点配置\
 （subtasks 列表，每项含 score/type/cases/pretest/sample/depend）；\
+- 在题目 config.yaml 的 **data_gen** 字段编写数据生成参数：\
+这是一个 map，key 为测试点名称（subtasks.cases 中的项），\
+value 为 generator 的命令行参数。生成数据时，若测试点在 data_gen 的 key 中，\
+执行 `<auxiliary/generator> <value>` 生成该测试点的输入；\
+不在 data_gen 中的测试点视为已有静态数据。\
+示例：`data_gen: {\"1\": \"-small\", \"2\": \"-big\", \"hack\": \"-hack\"}`。\
 - 造数据要覆盖边界与极限情况，有梯度、有强度。用中文汇报。
 
 ## 程序要求

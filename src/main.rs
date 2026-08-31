@@ -13,6 +13,7 @@ mod agent;
 mod assets;
 mod client;
 mod dupcheck;
+mod export_lemon;
 mod kb;
 mod model;
 mod paths;
@@ -21,6 +22,7 @@ mod prompts;
 mod session;
 mod skills;
 mod state;
+mod term;
 mod tools;
 
 use std::collections::VecDeque;
@@ -96,6 +98,11 @@ enum Commands {
     Session {
         #[command(subcommand)]
         cmd: SessionCmd,
+    },
+    /// 导出为各种 OJ/评测工具格式。
+    Export {
+        #[command(subcommand)]
+        cmd: ExportCmd,
     },
     /// 打印当前工程状态（比赛/题目/组件）。
     Status,
@@ -235,6 +242,7 @@ async fn main() -> Result<()> {
         Some(Commands::Kb { cmd }) => return run_kb_cmd(&cli, cmd).await,
         Some(Commands::Skill { cmd }) => return run_skill_cmd(&cli, cmd),
         Some(Commands::Session { cmd }) => return run_session_cmd(&cli, cmd),
+        Some(Commands::Export { cmd }) => return run_export_cmd(&cli, cmd),
         Some(Commands::Status) => {
             let contest_dir = resolve_contest(&root, cli.contest.as_deref());
             match contest_dir {
@@ -458,6 +466,30 @@ fn resolve_session_name(cdir: &Path, name: Option<&str>) -> Result<String> {
     }
 }
 
+#[derive(Subcommand)]
+enum ExportCmd {
+    /// 导出为 LemonLime 格式。
+    Lemon {
+        /// 输出目录（默认 <比赛目录>/<比赛名>_lemon/）。
+        output: Option<String>,
+    },
+}
+
+fn run_export_cmd(cli: &Cli, cmd: &ExportCmd) -> Result<()> {
+    let root = std::env::current_dir()?;
+    let Some(cdir) = resolve_contest(&root, cli.contest.as_deref()) else {
+        bail!("当前没有比赛工程（export 需要比赛目录）");
+    };
+    match cmd {
+        ExportCmd::Lemon { output } => {
+            let out = output.as_deref().map(Path::new);
+            let path = export_lemon::export(&cdir, out)?;
+            println!("已导出到 {}", path.display());
+            Ok(())
+        }
+    }
+}
+
 fn require_api_key_for_embeddings(embed_model: Option<&str>, api_key: Option<&str>) -> Result<()> {
     if embed_model.is_some() && api_key.is_none() {
         bail!("--embedding-model 需要 API key（--api-key 或 OPENAI_API_KEY）");
@@ -601,25 +633,56 @@ async fn run_repl(cli: &Cli, root: &Path) -> Result<()> {
             continue;
         }
 
-        let snapshot = messages.len();
         // 刷新系统消息（skills 可能中途变化）
         messages[0] = agent::system_message_for(Role::Supervisor, &app);
         messages.push(Message::user(trimmed.clone()));
         let deps = app.deps();
-        match agent::run_turn(&deps, &app, Role::Supervisor, None, &mut messages).await {
-            Ok(text) => {
-                if text.trim().is_empty() {
-                    println!("（模型未给出回答）");
-                } else {
-                    println!("{text}");
+
+        // 启用 raw 模式 + Esc 监视
+        let cancel = term::CancelFlag::new();
+        let raw_ok = tty && crossterm::terminal::enable_raw_mode().is_ok();
+        term::set_raw(raw_ok);
+        let watcher = if raw_ok {
+            Some(term::EscWatcher::start(cancel.clone()))
+        } else {
+            None
+        };
+
+        let result = agent::run_turn(
+            &deps,
+            &app,
+            Role::Supervisor,
+            None,
+            &mut messages,
+            true, // supervisor 实时打印流式内容
+            &cancel,
+        )
+        .await;
+
+        // 恢复终端
+        drop(watcher);
+        if raw_ok {
+            let _ = crossterm::terminal::disable_raw_mode();
+        }
+        term::set_raw(false);
+
+        match result {
+            Ok(turn_result) => {
+                if turn_result.interrupted {
+                    term::println_err("\n⚠ 已打断（保留已有输出）");
+                } else if turn_result.text.trim().is_empty() && !messages.is_empty() {
+                    // 模型可能只调用了工具，没有最终文本
+                }
+                // 打印换行分隔
+                println!();
+                // 打印 Token 用量
+                if let Some(usage) = &turn_result.usage {
+                    term::println_err(&client::format_usage(&app.model, usage));
                 }
             }
             Err(e) => {
-                messages.truncate(snapshot);
-                eprintln!("错误：{e:#}");
-                if !tty {
-                    return Err(anyhow!("回合失败：{e:#}"));
-                }
+                term::println_err(&format!("\n⚠ LLM 调用失败（已重试 5 次）：{e:#}"));
+                term::println_err("请检查网络连接或 API 配置后重新输入。");
             }
         }
         // 保存会话

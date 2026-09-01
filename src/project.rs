@@ -446,7 +446,55 @@ pub fn problem_status_text(p: &Problem, contest_dir: &Path) -> String {
             }
         },
     ));
+    out.push_str(&format!(
+        "last_tested：{}\n",
+        match &p.last_tested {
+            None => "未测试".to_string(),
+            Some(t) => {
+                let label = format!("{}（已通过）", t.format("%Y-%m-%d %H:%M:%S"));
+                if is_stale(contest_dir, &p.id, *t) {
+                    format!("{}（可能过时）", t.format("%Y-%m-%d %H:%M:%S"))
+                } else {
+                    label
+                }
+            }
+        },
+    ));
     out
+}
+
+/// 判断题目是否过时：检查关键文件是否在 last_tested 之后被修改。
+fn is_stale(contest_dir: &Path, pid: &str, last_tested: chrono::DateTime<chrono::Utc>) -> bool {
+    let pdir = problem_dir(contest_dir, pid);
+    let check_paths = [
+        pdir.join("config.yaml"),
+        pdir.join("auxiliary"),
+        pdir.join("solutions"),
+        pdir.join("data"),
+    ];
+    let last_modified = last_tested.timestamp();
+    for path in &check_paths {
+        if let Ok(meta) = std::fs::metadata(path) {
+            if let Ok(mtime) = meta.modified()
+                && let Ok(dt) = mtime.duration_since(std::time::UNIX_EPOCH)
+                    && dt.as_secs() as i64 > last_modified {
+                        return true;
+                    }
+            // 目录递归检查
+            if meta.is_dir()
+                && let Ok(rd) = std::fs::read_dir(path) {
+                    for e in rd.flatten() {
+                        if let Ok(m) = e.metadata()
+                            && let Ok(mt) = m.modified()
+                                && let Ok(dt) = mt.duration_since(std::time::UNIX_EPOCH)
+                                    && dt.as_secs() as i64 > last_modified {
+                                        return true;
+                                    }
+                    }
+                }
+        }
+    }
+    false
 }
 
 // ---------------------------------------------------------------------------

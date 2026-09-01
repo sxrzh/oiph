@@ -23,6 +23,7 @@ mod session;
 mod skills;
 mod state;
 mod term;
+mod test_runner;
 mod tools;
 
 use std::collections::VecDeque;
@@ -104,6 +105,11 @@ enum Commands {
     Export {
         #[command(subcommand)]
         cmd: ExportCmd,
+    },
+    /// 集成测试：编译、造数据、验证、运行 std 和 sols。
+    Test {
+        /// 指定题目 id（不指定则测试全部）。
+        problem: Option<String>,
     },
     /// 打印当前工程状态（比赛/题目/组件）。
     Status,
@@ -244,6 +250,7 @@ async fn main() -> Result<()> {
         Some(Commands::Skill { cmd }) => return run_skill_cmd(&cli, cmd),
         Some(Commands::Session { cmd }) => return run_session_cmd(&cli, cmd),
         Some(Commands::Export { cmd }) => return run_export_cmd(&cli, cmd),
+        Some(Commands::Test { problem }) => return run_test_cmd(&cli, problem.as_deref()),
         Some(Commands::Status) => {
             let contest_dir = resolve_contest(&root, cli.contest.as_deref());
             match contest_dir {
@@ -491,6 +498,28 @@ fn run_export_cmd(cli: &Cli, cmd: &ExportCmd) -> Result<()> {
     }
 }
 
+fn run_test_cmd(cli: &Cli, problem: Option<&str>) -> Result<()> {
+    let root = std::env::current_dir()?;
+    let Some(cdir) = resolve_contest(&root, cli.contest.as_deref()) else {
+        bail!("当前没有比赛工程（test 需要比赛目录）");
+    };
+    let reports = test_runner::run_tests(&cdir, problem);
+    let mut has_error = false;
+    for report in &reports {
+        let s = report.to_string_report();
+        if report.errors.is_empty() {
+            println!("{s}");
+        } else {
+            eprint!("{s}");
+            has_error = true;
+        }
+    }
+    if has_error {
+        bail!("集成测试存在错误");
+    }
+    Ok(())
+}
+
 fn require_api_key_for_embeddings(embed_model: Option<&str>, api_key: Option<&str>) -> Result<()> {
     if embed_model.is_some() && api_key.is_none() {
         bail!("--embedding-model 需要 API key（--api-key 或 OPENAI_API_KEY）");
@@ -657,7 +686,8 @@ async fn run_repl(cli: &Cli, root: &Path) -> Result<()> {
             Role::Supervisor,
             None,
             &mut messages,
-            true, // supervisor 实时打印流式内容
+            true,  // supervisor 实时打印流式内容
+            true,  // supervisor 显示思维链
             &cancel,
         )
         .await;

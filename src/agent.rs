@@ -56,6 +56,7 @@ pub const SUPERVISOR_TOOLS: &[&str] = &[
     "check_data",
     "check_std",
     "check_solutions",
+    "test_integrity",
     "call_searching_agent",
     "call_statement_agent",
     "call_solution_agent",
@@ -202,6 +203,16 @@ pub fn definition(name: &str) -> Option<Tool> {
                     }
                 }),
             },
+            "test_integrity" => FunctionDef {
+                name: "test_integrity".into(),
+                description: "集成测试：编译辅助程序、造数据、验证、运行 std 和 sols、检查正确性。纯确定性过程。返回警告和错误信息。".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "problem": { "type": "string", "description": "题目 id（不指定则测试全部题目）。" }
+                    }
+                }),
+            },
             "call_searching_agent" => sub_agent_def(
                 "call_searching_agent",
                 "调用 searching-agent：搜索冷门题目与资料，估计难度与知识点。task 需自包含。",
@@ -286,18 +297,20 @@ pub fn system_message_for(role: Role, app: &App) -> Message {
 /// - 子 Agent：使用固定的 `fixed_workdir`（比赛目录）。
 /// - `stream_output`：是否实时打印模型输出内容（supervisor 为 true，子 Agent 为 false）。
 /// - `cancel`：打断标志（双 Esc 触发）。
+#[allow(clippy::too_many_arguments)]
 pub async fn run_turn(
     deps: &AgentDeps<'_>,
     app: &App,
     role: Role,
     fixed_workdir: Option<&Path>,
     messages: &mut Vec<Message>,
-    stream_output: bool,
+    stream_content: bool,
+    stream_reasoning: bool,
     cancel: &CancelFlag,
 ) -> Result<TurnResult> {
     let tool_defs = definitions_for(role);
-    let on_content: fn(&str) = if stream_output { term::print_content } else { term::noop };
-    let on_reasoning: fn(&str) = if stream_output { term::print_reasoning } else { term::noop };
+    let on_content: fn(&str) = if stream_content { term::print_content } else { term::noop };
+    let on_reasoning: fn(&str) = if stream_reasoning { term::print_reasoning } else { term::noop };
     let mut total_usage: Option<ChatUsage> = None;
     // searching-agent 的搜索调用计数（web_search + fetch_url），超过上限则停止
     let mut search_call_count: u32 = 0;
@@ -313,7 +326,7 @@ pub async fn run_turn(
         }
 
         // 重置思维链缓冲
-        if stream_output {
+        if stream_reasoning {
             term::reset_reasoning_buf();
         }
 
@@ -493,6 +506,7 @@ pub async fn dispatch(
             "check_data" => Some(tool_check(ctx, args, "data").await),
             "check_std" => Some(tool_check(ctx, args, "std").await),
             "check_solutions" => Some(tool_check(ctx, args, "sols").await),
+            "test_integrity" => Some(tool_test_integrity(ctx, args).await),
             "call_searching_agent" => Some(call_sub_agent(Role::Searching, app, ctx, deps, cancel, args).await),
             "call_statement_agent" => Some(call_sub_agent(Role::Statement, app, ctx, deps, cancel, args).await),
             "call_solution_agent" => Some(call_sub_agent(Role::Solution, app, ctx, deps, cancel, args).await),
@@ -850,6 +864,28 @@ async fn tool_check(ctx: &ToolContext, args: &Value, component: &str) -> String 
     }
 }
 
+async fn tool_test_integrity(ctx: &ToolContext, args: &Value) -> String {
+    let problem = tools::opt_str(args, "problem");
+    let contest_dir = match current_contest(ctx) {
+        Ok(d) => d,
+        Err(e) => return err_str(e),
+    };
+    let reports = crate::test_runner::run_tests(&contest_dir, problem.as_deref());
+    let mut out = String::new();
+    for report in &reports {
+        out.push_str(&report.to_string_report());
+        out.push('\n');
+    }
+    let total_errors: usize = reports.iter().map(|r| r.errors.len()).sum();
+    let total_warnings: usize = reports.iter().map(|r| r.warnings.len()).sum();
+    if total_errors == 0 && total_warnings == 0 {
+        out.push_str("所有题目集成测试通过，无警告无错误。");
+    } else {
+        out.push_str(&format!("共 {} 个错误、{} 个警告。", total_errors, total_warnings));
+    }
+    out
+}
+
 // ---------------------------------------------------------------------------
 // 子 Agent 调用
 // ---------------------------------------------------------------------------
@@ -917,7 +953,8 @@ async fn call_sub_agent(
         role,
         Some(&contest_dir),
         &mut messages,
-        false, // 子 Agent 不实时打印内容
+        false,  // 子 Agent 不实时打印内容
+        true,   // 子 Agent 显示思维链
         cancel, // 透传 supervisor 的打断信号
     )
     .await;

@@ -417,8 +417,11 @@ pub struct Problem {
     pub interactive_lib: Option<Component>,
     #[serde(default)]
     pub tutorial: ComponentStatus,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub duplicate_check: Option<DuplicateCheckResult>,
+    /// 上次集成测试时间。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_tested: Option<DateTime<Utc>>,
     #[serde(default)]
     pub files: ProblemFiles,
 }
@@ -496,6 +499,7 @@ impl Default for Problem {
             interactive_lib: None,
             tutorial: ComponentStatus::NotStarted,
             duplicate_check: None,
+            last_tested: None,
             files: ProblemFiles::default(),
         }
     }

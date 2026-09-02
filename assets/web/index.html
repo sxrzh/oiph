@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OI 组题助手</title>
+<style>
+* { margin:0; padding:0; box-sizing:border-box; }
+body { font-family:system-ui,sans-serif; font-size:14px; background:#1a1a2e; color:#e0e0e0; height:100vh; display:flex; flex-direction:column; }
+#menubar { background:#16213e; padding:6px 12px; display:flex; gap:8px; align-items:center; border-bottom:1px solid #0f3460; }
+#menubar button { background:#0f3460; color:#e0e0e0; border:none; padding:4px 12px; border-radius:4px; cursor:pointer; font-size:13px; }
+#menubar button:hover { background:#1a4a8a; }
+#main { display:flex; flex:1; overflow:hidden; }
+#left-panel { width:45%; min-width:300px; display:flex; flex-direction:column; border-right:2px solid #0f3460; }
+#right-panel { flex:1; display:flex; flex-direction:column; }
+#statusbar { background:#16213e; padding:4px 12px; display:flex; gap:16px; align-items:center; border-top:1px solid #0f3460; font-size:12px; color:#888; }
+.problem-tabs { display:flex; gap:2px; padding:4px 8px 0; background:#0d1b2a; overflow-x:auto; }
+.problem-tab { padding:6px 12px; border-radius:4px 4px 0 0; cursor:pointer; white-space:nowrap; font-size:13px; border-bottom:2px solid transparent; }
+.problem-tab.active { background:#1a1a2e; border-bottom-color:#e94560; }
+.problem-tab .status-dot { display:inline-block; width:8px; height:8px; border-radius:50%; margin-right:4px; }
+.dot-gray{background:#666}.dot-yellow{background:#fa0}.dot-green{background:#0a0}.dot-red{background:#a00}
+.detail-tabs { display:flex; gap:2px; padding:4px 8px 0; background:#0d1b2a; }
+.detail-tab { padding:4px 10px; border-radius:4px 4px 0 0; cursor:pointer; font-size:12px; }
+.detail-tab.active { background:#1a1a2e; color:#e94560; }
+.detail-content { flex:1; overflow:auto; padding:12px; }
+.chat-area { flex:1; overflow:auto; padding:12px; display:flex; flex-direction:column; gap:8px; }
+.msg { max-width:85%; padding:8px 12px; border-radius:8px; word-break:break-word; white-space:pre-wrap; }
+.msg.user { align-self:flex-end; background:#0f3460; }
+.msg.assistant, .msg.tool, .msg.system { align-self:flex-start; background:#1e2a3a; }
+.msg .role-tag { font-size:11px; color:#888; margin-bottom:2px; }
+.msg.tool { font-family:monospace; font-size:12px; background:#0d1b2a; }
+.msg .tool-call { font-size:12px; color:#7ec8e3; }
+#input-area { padding:8px 12px; background:#0d1b2a; display:flex; gap:8px; align-items:flex-end; }
+#chat-input { flex:1; background:#16213e; color:#e0e0e0; border:1px solid #0f3460; border-radius:6px; padding:8px; resize:none; min-height:36px; max-height:120px; font-size:14px; }
+#send-btn, #stop-btn { background:#e94560; color:#fff; border:none; padding:8px 16px; border-radius:6px; cursor:pointer; font-size:13px; white-space:nowrap; }
+#send-btn:hover { background:#ff5577; }
+#stop-btn { background:#a00; }
+#stop-btn:hover { background:#c00; }
+.session-bar { display:flex; gap:8px; align-items:center; padding:4px 8px; background:#0d1b2a; }
+.session-bar select { background:#16213e; color:#e0e0e0; border:1px solid #0f3460; border-radius:4px; padding:2px 6px; font-size:12px; }
+.session-bar button { background:#0f3460; border:none; color:#e0e0e0; padding:2px 8px; border-radius:4px; cursor:pointer; font-size:12px; }
+pre { white-space:pre-wrap; word-break:break-word; }
+table { border-collapse:collapse; width:100%; margin:4px 0; }
+th,td { border:1px solid #333; padding:4px 8px; text-align:left; font-size:12px; }
+th { background:#0d1b2a; }
+textarea { width:100%; min-height:200px; background:#0d1b2a; color:#e0e0e0; border:1px solid #333; border-radius:4px; padding:8px; font-family:monospace; font-size:13px; }
+.btn { background:#0f3460; border:none; color:#e0e0e0; padding:4px 10px; border-radius:4px; cursor:pointer; font-size:12px; }
+.btn:hover{background:#1a4a8a}
+.file-link { color:#7ec8e3; cursor:pointer; text-decoration:underline; }
+</style>
+</head>
+<body>
+<div id="menubar">
+  <button onclick="exportLemon()">导出 Lemon</button>
+  <button onclick="runTest()">集成测试</button>
+  <span style="margin-left:auto;font-size:12px;color:#888">OI 组题助手</span>
+</div>
+<div id="main">
+  <div id="left-panel">
+    <div class="problem-tabs" id="problem-tabs"></div>
+    <div class="detail-tabs" id="detail-tabs"></div>
+    <div class="detail-content" id="detail-content">
+      <p style="color:#888">加载中...</p>
+    </div>
+  </div>
+  <div id="right-panel">
+    <div class="session-bar">
+      <select id="session-select" onchange="switchSession()"></select>
+      <button onclick="newSession()">新建</button>
+      <span id="session-info" style="color:#888;font-size:11px"></span>
+    </div>
+    <div class="chat-area" id="chat-area"></div>
+    <div id="input-area">
+      <textarea id="chat-input" rows="1" placeholder="输入消息... (Enter 发送, Shift+Enter 换行)" onkeydown="handleKey(event)"></textarea>
+      <button id="send-btn" onclick="sendMessage()">发送</button>
+      <button id="stop-btn" onclick="stopAgent()" style="display:none">中止</button>
+    </div>
+  </div>
+</div>
+<div id="statusbar">
+  <span id="status-path">-</span>
+  <span id="status-usage"></span>
+</div>
+<script>
+let ws=null, currentProblem=null, currentDetailTab='基本信息';
+const statusColors={'NotStarted':'gray','InProgress':'yellow','Completed':'green','Failed':'red'};
+function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
+async function api(url,opts){const r=await fetch(url,opts);return r.json()}
+async function loadContest(){
+  const d=await api('/api/contest');
+  document.getElementById('status-path').textContent=d.contest_dir||'无比赛工程';
+  let problems=[];
+  if(d.problems){
+    for(const p of d.problems){
+      const st=p.status||'';
+      let dot='gray';
+      if(st.includes('完成')||st.includes('已完成'))dot='green';
+      else if(st.includes('进行'))dot='yellow';
+      else if(st.includes('失败'))dot='red';
+      problems.push({id:p.id,name:p.name,dot:dot});
+    }
+  }
+  renderProblemTabs(problems);
+  if(problems.length>0&&currentProblem===null){currentProblem=problems[0].id}
+  if(currentProblem)loadProblem(currentProblem);
+}
+function renderProblemTabs(problems){
+  const el=document.getElementById('problem-tabs');el.innerHTML='';
+  for(const p of problems){
+    const pid=p.id||p;
+    const name=p.name||pid;
+    const dot=p.dot||'gray';
+    const d=document.createElement('div');
+    d.className='problem-tab'+(pid===currentProblem?' active':'');
+    d.innerHTML='<span class="status-dot dot-'+dot+'"></span>'+esc(name);
+    d.onclick=()=>{currentProblem=pid;loadProblem(pid);renderProblemTabs(problems)};
+    el.appendChild(d);
+  }
+}
+async function loadProblem(pid){
+  const d=await api('/api/problem/'+pid);
+  if(d.error){document.getElementById('detail-content').innerHTML='<p>'+esc(d.error)+'</p>';return}
+  const config=d.config||'';const files=d.files||'';
+  renderDetailTabs(pid,config,files);
+}
+function renderDetailTabs(pid,config,files){
+  const tabs=['基本信息','题面','题解','数据','辅助程序','解法'];
+  const el=document.getElementById('detail-tabs');el.innerHTML='';
+  for(const t of tabs){
+    const d=document.createElement('div');
+    d.className='detail-tab'+(t===currentDetailTab?' active':'');
+    d.textContent=t;d.onclick=()=>{currentDetailTab=t;renderDetailTabs(pid,config,files)};
+    el.appendChild(d);
+  }
+  const c=document.getElementById('detail-content');
+  if(currentDetailTab==='基本信息'){
+    c.innerHTML='<pre>'+esc(config)+'</pre>';
+  } else if(currentDetailTab==='题面'){
+    c.innerHTML=`<div><button class="btn" onclick="loadFile('statement/zh_cn.md')">加载题面</button></div><div id="file-editor"></div>`;
+  } else if(currentDetailTab==='题解'){
+    c.innerHTML=`<div><button class="btn" onclick="loadFile('statement/tutorial.md')">加载题解</button></div><div id="file-editor"></div>`;
+  } else if(currentDetailTab==='辅助程序'){
+    c.innerHTML='<pre>'+esc(files)+'</pre>';
+  } else if(currentDetailTab==='数据'){
+    c.innerHTML='<pre>'+esc(files)+'</pre>';
+  } else {
+    c.innerHTML='<pre>'+esc(config)+'</pre>';
+  }
+}
+async function loadFile(path){
+  const d=await api('/api/file?path='+encodeURIComponent(path));
+  const el=document.getElementById('file-editor');
+  if(d.error){el.innerHTML='<p>'+esc(d.error)+'</p>';return}
+  el.innerHTML=`<textarea id="file-textarea">${esc(d.content)}</textarea><br><button class="btn" onclick="saveFile('${path}')">保存</button>`;
+}
+async function saveFile(path){
+  const content=document.getElementById('file-textarea').value;
+  const d=await api('/api/file',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({path,content})});
+  alert(d.ok?'已保存':d.error);
+}
+// WebSocket
+function connectWS(){
+  const proto=location.protocol==='https:'?'wss':'ws';
+  ws=new WebSocket(proto+'://'+location.host+'/ws');
+  ws.onopen=()=>{console.log('WS connected')};
+  ws.onmessage=(e)=>{
+    const msg=JSON.parse(e.data);
+    handleWSMessage(msg);
+  };
+  ws.onclose=()=>{setTimeout(connectWS,2000)};
+}
+let currentMsgEl=null, streaming=false;
+function handleWSMessage(msg){
+  if(msg.type==='content'){
+    if(!currentMsgEl||currentMsgEl.dataset.role!=='assistant'){
+      currentMsgEl=addMessage('assistant','');
+    }
+    currentMsgEl.querySelector('.text').textContent+=msg.text;
+    scrollChat();
+  } else if(msg.type==='reasoning'){
+    if(!currentMsgEl||currentMsgEl.dataset.role!=='reasoning'){
+      currentMsgEl=addMessage('reasoning','[思维链] ');
+    }
+    currentMsgEl.querySelector('.text').textContent+=msg.text;
+    scrollChat();
+  } else if(msg.type==='log'){
+    // 工具调用日志
+    if(msg.text.startsWith('工具调用：')||msg.text.startsWith('->')){
+      addMessage('tool',msg.text);
+    }
+  } else if(msg.type==='done'||msg.type==='error'){
+    streaming=false;
+    document.getElementById('send-btn').style.display='';
+    document.getElementById('stop-btn').style.display='none';
+    currentMsgEl=null;
+    if(msg.type==='error'){addMessage('system','错误：'+msg.message)}
+    if(msg.usage){document.getElementById('status-usage').textContent=`输入${msg.usage.prompt_tokens}/输出${msg.usage.completion_tokens}`}
+  } else if(msg.type==='messages'){
+    renderMessages(msg.messages);
+  }
+}
+function addMessage(role,text){
+  const el=document.createElement('div');
+  el.className='msg '+role;el.dataset.role=role;
+  const roleTag=role==='user'?'你':role==='assistant'?'Supervisor':role==='tool'?'工具':role==='reasoning'?'思维链':'系统';
+  el.innerHTML=`<div class="role-tag">${roleTag}</div><div class="text">${esc(text)}</div>`;
+  document.getElementById('chat-area').appendChild(el);
+  scrollChat();return el;
+}
+function renderMessages(msgs){
+  const area=document.getElementById('chat-area');area.innerHTML='';
+  for(const m of msgs){
+    if(m.role==='system'&&msgs.indexOf(m)===0)continue;
+    const el=document.createElement('div');
+    el.className='msg '+(m.role==='user'?'user':m.role);
+    const tag=m.role==='user'?'你':m.role==='assistant'?'Supervisor':'工具';
+    let content=m.content||'';
+    if(m.tool_calls){for(const tc of m.tool_calls){content+=`\n[工具调用: ${tc.function.name}(${tc.function.arguments})]`}}
+    el.innerHTML=`<div class="role-tag">${tag}</div><div class="text">${esc(content)}</div>`;
+    area.appendChild(el);
+  }
+  scrollChat();
+}
+function scrollChat(){const a=document.getElementById('chat-area');a.scrollTop=a.scrollHeight}
+function sendMessage(){
+  const input=document.getElementById('chat-input');
+  const text=input.value.trim();if(!text)return;
+  addMessage('user',text);input.value='';
+  streaming=true;
+  document.getElementById('send-btn').style.display='none';
+  document.getElementById('stop-btn').style.display='';
+  ws.send(JSON.stringify({type:'chat',text}));
+}
+function stopAgent(){ws.send(JSON.stringify({type:'stop'}))}
+function handleKey(e){if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();sendMessage()}}
+// Sessions
+async function loadSessions(){
+  const d=await api('/api/sessions');
+  const sel=document.getElementById('session-select');sel.innerHTML='';
+  for(const s of d.sessions){
+    const o=document.createElement('option');o.value=s.name;
+    o.textContent=`${s.name} (${s.messages}条)`;
+    if(s.current)o.selected=true;sel.appendChild(o);
+  }
+  if(d.current){document.getElementById('session-info').textContent='当前: '+d.current}
+}
+async function switchSession(){
+  const name=document.getElementById('session-select').value;
+  if(!name)return;
+  const d=await api('/api/session/switch',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name})});
+  if(d.ok){loadSessions()}else{alert(d.error)}
+}
+async function newSession(){
+  const name=prompt('会话名称（留空自动生成）');
+  const d=await api('/api/session/new',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({name:name||null})});
+  if(d.ok){loadSessions();document.getElementById('chat-area').innerHTML=''}
+  else{alert(d.error)}
+}
+async function exportLemon(){
+  const d=await api('/api/export/lemon',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});
+  alert(d.ok?'已导出到 '+d.path:d.error);
+}
+async function runTest(){
+  const d=await api('/api/test',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({})});
+  let text='';for(const r of d.reports){text+=`题目 ${r.problem_id}:\n`;for(const l of r.log){text+=`  ${l}\n`}if(r.errors.length)text+=`  错误: ${r.errors.length}个\n`;if(r.warnings.length)text+=`  警告: ${r.warnings.length}个\n`}
+  alert(text||'测试完成');
+}
+// Init
+loadContest();loadSessions();connectWS();
+setInterval(loadContest,5000);setInterval(loadSessions,10000);
+</script>
+</body>
+</html>

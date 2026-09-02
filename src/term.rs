@@ -1,14 +1,27 @@
 //! 终端辅助：raw 模式输出适配、双 Esc 打断。
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-
-use tokio::sync::Notify;
+use tokio::sync::{Notify, mpsc::UnboundedSender};
 
 thread_local! {
     static RAW_MODE: Cell<bool> = const { Cell::new(false) };
+    static WS_SENDER: RefCell<Option<UnboundedSender<String>>> = const { RefCell::new(None) };
+}
+
+/// 设置 WebSocket 发送器（Web GUI 模式下用），将日志/内容转发给前端。
+pub fn set_ws_sender(sender: Option<UnboundedSender<String>>) {
+    WS_SENDER.with(|s| *s.borrow_mut() = sender);
+}
+
+fn ws_send(msg: &str) {
+    WS_SENDER.with(|s| {
+        if let Some(sender) = s.borrow().as_ref() {
+            let _ = sender.send(msg.to_string());
+        }
+    });
 }
 
 pub fn set_raw(on: bool) {
@@ -29,7 +42,7 @@ pub fn print_out(text: &str) {
     let _ = std::io::Write::flush(&mut std::io::stdout());
 }
 
-/// stderr 输出，raw 模式下把 `\n` 转 `\r\n`。
+/// stderr 输出，raw 模式下把 `\n` 转 `\r\n`。同时转发到 WebSocket（若设置）。
 pub fn print_err(text: &str) {
     if is_raw() {
         eprint!("{}", text.replace('\n', "\r\n"));
@@ -37,6 +50,10 @@ pub fn print_err(text: &str) {
         eprint!("{}", text);
     }
     let _ = std::io::Write::flush(&mut std::io::stderr());
+    ws_send(&format!(
+        r#"{{"type":"log","text":{}}}"#,
+        serde_json::to_string(text).unwrap_or_default()
+    ));
 }
 
 pub fn println_err(text: &str) {
@@ -47,9 +64,13 @@ pub fn println_err(text: &str) {
 /// 空操作，供子 Agent 传递给 chat_stream 的 on_content 回调。
 pub fn noop(_: &str) {}
 
-/// 打印流式内容（供 supervisor 的 on_content 回调）。
+/// 打印流式内容（供 supervisor 的 on_content 回调）。同时转发到 WebSocket。
 pub fn print_content(text: &str) {
     print_out(text);
+    ws_send(&format!(
+        r#"{{"type":"content","text":{}}}"#,
+        serde_json::to_string(text).unwrap_or_default()
+    ));
 }
 
 /// 打印思维链。过长时只显示最后 300 字符，前面用 ... 替代。
@@ -77,6 +98,11 @@ pub fn print_reasoning(text: &str) {
     // 回车到行首覆盖
     print_err("\r");
     print_err(&format!("\x1b[2m[思维链] {}\x1b[0m\r", display.chars().take(200).collect::<String>()));
+    // WebSocket 转发原始 delta
+    ws_send(&format!(
+        r#"{{"type":"reasoning","text":{}}}"#,
+        serde_json::to_string(text).unwrap_or_default()
+    ));
 }
 
 // ---------------------------------------------------------------------------

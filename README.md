@@ -27,16 +27,23 @@ This agent is here to help you out! Based on high problem-solving ability of LLM
 ```sh
 cargo build
 
-# 交互式（supervisor 对话）
-export OPENAI_BASE_URL=https://api.openai.com/v1   # 或其他 OpenAI 兼容端点
-export OPENAI_API_KEY=sk-...
+# GUI 模式（默认，无子命令时启动）
 ./target/debug/preparer
+# 浏览器访问 http://localhost:17217
 
-# 单次任务（管道模式逐行多轮）
-echo "出一场模拟赛" | ./target/debug/preparer
+# CLI 模式
+./target/debug/preparer cli           # 进入交互式 REPL
+./target/debug/preparer cli "出题"    # 单次任务
 
-# 查看工程状态（无需 LLM）
-./target/debug/preparer status
+# 指定 GUI 端口
+./target/debug/preparer --port 8080
+
+# 其他 CLI 子命令
+./target/debug/preparer status        # 查看工程状态
+./target/debug/preparer test [题目id] # 集成测试
+./target/debug/preparer export lemon  # 导出 LemonLime
+./target/debug/preparer kb add <文件> # 知识库管理
+./target/debug/preparer session list # 会话管理
 
 # 知识库管理（两级）
 - 全局知识库：`~/.oiph/kb/`；工程知识库：`<比赛工程>/.oiph/kb/`（检索时两者合并）
@@ -67,9 +74,20 @@ echo "出一场模拟赛" | ./target/debug/preparer
 ./target/debug/preparer session show myname   # 打印会话内容
 ```
 
-常用参数：`-m 模型名`、`--max-steps 40`、`-c 比赛目录`、`--dup-backend cpret|yuantiji`、`--embedding-model`（省略则用内置离线哈希 embedding）。
+常用参数：`-m 模型名`、`--max-steps 40`、`-c 比赛目录`、`--dup-backend cpret|yuantiji`、`--port 17217`（GUI 端口）、`--embedding-model`（省略则用内置离线哈希 embedding）。
 
-## 交互式指令（/ 开头，本地执行）
+## GUI 模式
+
+无子命令启动时默认进入 GUI 模式，浏览器访问 `http://localhost:17217`：
+
+- **左侧题目区**：题目选项卡 + 基本信息/题面/题解/数据/辅助程序/解法标签页
+- **右侧对话区**：与 supervisor agent 实时流式对话（含思维链）、session 切换、中止按钮
+- **顶部菜单**：导出 LemonLime、集成测试
+- **底部状态栏**：工程路径、Token 用量
+
+## CLI 模式
+
+`preparer cli` 进入交互式 REPL，支持 `/` 开头的本地指令：
 
 | 指令 | 作用 |
 | --- | --- |

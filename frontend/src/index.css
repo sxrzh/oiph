@@ -1,0 +1,301 @@
+:root {
+  --bg: #1a1a2e;
+  --bg-panel: #16213e;
+  --bg-tab: #0d1b2a;
+  --bg-input: #16213e;
+  --fg: #e0e0e0;
+  --fg-muted: #888;
+  --accent: #e94560;
+  --border: #0f3460;
+  --green: #0a0;
+  --yellow: #fa0;
+  --red: #a00;
+  --gray: #666;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: system-ui, -apple-system, sans-serif;
+  font-size: 14px;
+  background: var(--bg);
+  color: var(--fg);
+  height: 100vh;
+  overflow: hidden;
+}
+
+#root { height: 100vh; }
+
+.app {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+}
+
+.menubar {
+  background: var(--bg-panel);
+  padding: 6px 12px;
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  border-bottom: 1px solid var(--border);
+}
+
+.menubar button {
+  background: var(--border);
+  color: var(--fg);
+  border: none;
+  padding: 4px 12px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 13px;
+}
+.menubar button:hover { background: #1a4a8a; }
+
+.main { display: flex; flex: 1; overflow: hidden; }
+
+.left-panel {
+  width: 45%;
+  min-width: 250px;
+  display: flex;
+  flex-direction: column;
+  border-right: 2px solid var(--border);
+  overflow: hidden;
+}
+
+.right-panel {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.statusbar {
+  background: var(--bg-panel);
+  padding: 4px 12px;
+  display: flex;
+  gap: 16px;
+  align-items: center;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--fg-muted);
+}
+
+.splitter {
+  width: 4px;
+  background: var(--border);
+  cursor: col-resize;
+  flex-shrink: 0;
+}
+.splitter:hover { background: var(--accent); }
+
+.problem-tabs, .detail-tabs {
+  display: flex;
+  gap: 2px;
+  padding: 4px 8px 0;
+  background: var(--bg-tab);
+  overflow-x: auto;
+}
+
+.problem-tab, .detail-tab {
+  padding: 6px 12px;
+  border-radius: 4px 4px 0 0;
+  cursor: pointer;
+  white-space: nowrap;
+  font-size: 13px;
+  border-bottom: 2px solid transparent;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.problem-tab.active, .detail-tab.active {
+  background: var(--bg);
+  border-bottom-color: var(--accent);
+}
+
+.status-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+.dot-gray { background: var(--gray); }
+.dot-yellow { background: var(--yellow); }
+.dot-green { background: var(--green); }
+.dot-red { background: var(--red); }
+
+.progress-ring {
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  border: 2px solid var(--gray);
+  position: relative;
+}
+.progress-ring.filled { border-color: var(--green); }
+
+.detail-content {
+  flex: 1;
+  overflow: auto;
+  padding: 12px;
+}
+
+.chat-area {
+  flex: 1;
+  overflow: auto;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.msg {
+  max-width: 85%;
+  padding: 8px 12px;
+  border-radius: 8px;
+  word-break: break-word;
+  white-space: pre-wrap;
+}
+.msg.user { align-self: flex-end; background: var(--border); }
+.msg.assistant, .msg.tool, .msg.system { align-self: flex-start; background: #1e2a3a; }
+.msg .role-tag { font-size: 11px; color: var(--fg-muted); margin-bottom: 2px; }
+.msg.tool { font-family: monospace; font-size: 12px; background: var(--bg-tab); }
+
+.input-area {
+  padding: 8px 12px;
+  background: var(--bg-tab);
+  display: flex;
+  gap: 8px;
+  align-items: flex-end;
+}
+
+.chat-input {
+  flex: 1;
+  background: var(--bg-input);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 8px;
+  resize: none;
+  min-height: 36px;
+  max-height: 120px;
+  font-size: 14px;
+  font-family: inherit;
+}
+
+.btn-send, .btn-stop {
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  padding: 8px 16px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  white-space: nowrap;
+}
+.btn-send:hover { background: #ff5577; }
+.btn-stop { background: var(--red); }
+
+.session-bar {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  padding: 4px 8px;
+  background: var(--bg-tab);
+}
+.session-bar select {
+  background: var(--bg-panel);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-size: 12px;
+}
+.session-bar button {
+  background: var(--border);
+  border: none;
+  color: var(--fg);
+  padding: 2px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+}
+
+table { border-collapse: collapse; width: 100%; margin: 4px 0; }
+th, td { border: 1px solid #333; padding: 4px 8px; text-align: left; font-size: 12px; }
+th { background: var(--bg-tab); }
+
+textarea.editor {
+  width: 100%;
+  min-height: 200px;
+  background: var(--bg-tab);
+  color: var(--fg);
+  border: 1px solid #333;
+  border-radius: 4px;
+  padding: 8px;
+  font-family: 'Cascadia Code', 'Fira Code', monospace;
+  font-size: 13px;
+  resize: vertical;
+}
+
+.btn {
+  background: var(--border);
+  border: none;
+  color: var(--fg);
+  padding: 4px 10px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+}
+.btn:hover { background: #1a4a8a; }
+
+.file-link {
+  color: #7ec8e3;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
+.spoiler { margin: 4px 0; }
+.spoiler-header {
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px;
+  background: var(--bg-tab);
+  border-radius: 4px;
+}
+.spoiler-arrow { font-size: 12px; }
+.spoiler-body { padding: 8px 4px 4px 16px; }
+
+.markdown-preview {
+  padding: 8px;
+  background: var(--bg-tab);
+  border-radius: 4px;
+  overflow: auto;
+}
+.markdown-preview p { margin: 4px 0; }
+.markdown-preview code {
+  background: #0d1b2a;
+  padding: 2px 4px;
+  border-radius: 2px;
+  font-family: monospace;
+}
+.markdown-preview pre {
+  background: #0d1b2a;
+  padding: 8px;
+  border-radius: 4px;
+  overflow: auto;
+}
+.markdown-preview table { border-collapse: collapse; }
+.markdown-preview th, .markdown-preview td { border: 1px solid #333; padding: 4px; }
+
+.status-cell {
+  padding: 2px 6px;
+  border-radius: 3px;
+  font-size: 11px;
+  display: inline-block;
+}
+.status-cell.gray { background: #333; color: #aaa; }
+.status-cell.yellow { background: #553; color: #ff0; }
+.status-cell.green { background: #243; color: #0f0; }
+.status-cell.red { background: #422; color: #f44; }

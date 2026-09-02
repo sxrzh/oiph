@@ -19,6 +19,7 @@ mod model;
 mod paths;
 mod project;
 mod prompts;
+mod server;
 mod session;
 mod skills;
 mod state;
@@ -76,6 +77,10 @@ struct Cli {
     #[arg(long, default_value = "cpret", global = true)]
     dup_backend: String,
 
+    /// GUI 端口（仅 GUI 模式）。
+    #[arg(long, default_value_t = 17217, global = true)]
+    port: u16,
+
     /// 首个任务。使用 "-" 从 stdin 读取所有行为任务。
     /// 交互模式下（有终端）后续回合从终端读取。
     prompt: Option<String>,
@@ -86,6 +91,11 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// 启动 CLI REPL（无子命令时默认启动 GUI）。
+    Cli {
+        /// 首个任务。
+        prompt: Option<String>,
+    },
     /// 管理知识库（RAG 文档）。
     Kb {
         #[command(subcommand)]
@@ -246,6 +256,7 @@ async fn main() -> Result<()> {
     let root = std::env::current_dir()?;
 
     match &cli.command {
+        Some(Commands::Cli { prompt }) => return run_cli(&cli, prompt.as_deref()).await,
         Some(Commands::Kb { cmd }) => return run_kb_cmd(&cli, cmd).await,
         Some(Commands::Skill { cmd }) => return run_skill_cmd(&cli, cmd),
         Some(Commands::Session { cmd }) => return run_session_cmd(&cli, cmd),
@@ -262,7 +273,43 @@ async fn main() -> Result<()> {
         None => {}
     }
 
-    run_repl(&cli, &root).await
+    // 无子命令：启动 GUI
+    run_gui(&cli).await
+}
+
+async fn run_gui(cli: &Cli) -> Result<()> {
+    let root = std::env::current_dir()?;
+    let dup_backend = dupcheck::Backend::parse(&cli.dup_backend).unwrap_or_default();
+    let app = Arc::new(App::new(
+        root,
+        cli.base_url.clone(),
+        cli.api_key.clone().unwrap_or_default(),
+        cli.embedding_model.clone(),
+        cli.model.clone(),
+        cli.max_steps,
+        dup_backend,
+    )?);
+    let contest_dir = resolve_contest(&app.root, cli.contest.as_deref());
+    app.set_contest_dir(contest_dir);
+    seed_builtin(&app).await;
+    server::serve(app, cli.port).await
+}
+
+async fn run_cli(cli: &Cli, prompt: Option<&str>) -> Result<()> {
+    // 构造一个伪 Cli prompt 并调用 run_repl
+    let fake_cli = Cli {
+        base_url: cli.base_url.clone(),
+        api_key: cli.api_key.clone(),
+        model: cli.model.clone(),
+        max_steps: cli.max_steps,
+        embedding_model: cli.embedding_model.clone(),
+        contest: cli.contest.clone(),
+        dup_backend: cli.dup_backend.clone(),
+        port: cli.port,
+        prompt: prompt.map(String::from),
+        command: None,
+    };
+    run_repl(&fake_cli, &std::env::current_dir()?).await
 }
 
 /// kb add/clear 的目标目录：指定 --global 用全局；否则用工程知识库（无比赛工程则全局）。

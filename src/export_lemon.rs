@@ -311,8 +311,8 @@ fn write_compile_bat(out_dir: &Path, spj_dirs: &[String]) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{Component, ComponentStatus, Subtask, SubtaskType};
-    use chrono::Utc;
+    use crate::model::{ComponentStatus, Subtask, SubtaskType};
+    // use chrono::Utc;
 
     fn make_contest(dir: &Path) {
         project::init_contest(dir, "test").unwrap();

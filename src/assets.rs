@@ -3,53 +3,19 @@
 //! - `get_testlib` / `get_checker` 工具直接把文件写到工程目录。
 //! - 内置知识库文档（assets/kb/*）在启动时种子到全局知识库 ~/.oiph/kb。
 //! - 内置 skills（assets/skills/*/SKILL.md）在启动时种子到 ~/.oiph/skills。
+//!
+//! KB_DOCS 和 BUILTIN_SKILLS 由 build.rs 自动扫描 assets/kb/ 和 assets/skills/
+//! 生成，添加文件无需修改代码。
 
 pub const TESTLIB_H: &str = include_str!("../assets/auxiliary/testlib.h");
 
 /// LemonLime 兼容的 testlib.h（含 `TESTLIB_FOR_LEMONS` 定义）。
 pub const LEMON_TESTLIB_H: &str = include_str!("../assets/lemon/testlib.h");
 
-/// 内置知识库文档：(文件名, 内容)。
-pub const KB_DOCS: &[(&str, &str)] = &[
-    (
-        "statement_req.md",
-        include_str!("../assets/kb/statement_req.md"),
-    ),
-    ("sources.md", include_str!("../assets/kb/sources.md")),
-    (
-        "NOI_Syllabus_Edition_2025.txt",
-        include_str!("../assets/kb/NOI_Syllabus_Edition_2025.txt"),
-    ),
-];
-
-/// 内置 skills：(skill 名, SKILL.md 内容)。
-pub const BUILTIN_SKILLS: &[(&str, &str)] = &[(
-    "duipai",
-    include_str!("../assets/skills/duipai/SKILL.md"),
-)];
-
 pub const CHECKER_NAMES: &[&str] = &[
-    "acmp",
-    "caseicmp",
-    "casencmp",
-    "casewcmp",
-    "dcmp",
-    "fcmp",
-    "hcmp",
-    "icmp",
-    "lcmp",
-    "ncmp",
-    "nyesno",
-    "pointscmp",
-    "pointsinfo",
-    "rcmp",
-    "rcmp4",
-    "rcmp6",
-    "rcmp9",
-    "rncmp",
-    "uncmp",
-    "wcmp",
-    "yesno",
+    "acmp", "caseicmp", "casencmp", "casewcmp", "dcmp", "fcmp", "hcmp",
+    "icmp", "lcmp", "ncmp", "nyesno", "pointscmp", "pointsinfo",
+    "rcmp", "rcmp4", "rcmp6", "rcmp9", "rncmp", "uncmp", "wcmp", "yesno",
 ];
 
 pub fn checker_source(name: &str) -> Option<&'static str> {

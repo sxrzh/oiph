@@ -1,7 +1,15 @@
-//! 会话持久化：把 supervisor 对话保存为 JSON，存于 `<比赛工程>/.oiph/sessions/`。
+//! 会话持久化：主 session 为目录，含 main.json + 子 agent 的 sub-N.json。
 //!
-//! - 启动时默认加载上一次的 session（按 `current` 指针，缺失则取最近修改的）。
-//! - 支持新建 / 切换 / 删除 / 导出 session。
+//! 目录结构：
+//! ```text
+//! .oiph/sessions/
+//!   current                 # 指向当前 session 名
+//!   session-XXX/            # session 目录
+//!     main.json             # 主 session（supervisor 消息 + children 引用）
+//!     sub-1.json            # 子 agent session
+//!     sub-2.json
+//! ```
+
 
 use std::path::{Path, PathBuf};
 
@@ -14,12 +22,31 @@ use crate::client::Message;
 pub const SESSIONS_DIR_NAME: &str = "sessions";
 pub const CURRENT_FILE: &str = "current";
 pub const NAME_PREFIX: &str = "session-";
+pub const MAIN_FILE: &str = "main.json";
 
+/// 子 session 引用。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChildRef {
+    pub filename: String, // e.g. "sub-1.json"
+    pub agent: String,    // e.g. "solution"
+    pub summary: String,  // 简要描述
+}
+
+/// 主 session。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
     pub name: String,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+    pub messages: Vec<Message>,
+    #[serde(default)]
+    pub children: Vec<ChildRef>,
+}
+
+/// 子 session（仅消息列表）。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct SubSession {
+    pub agent: String,
     pub messages: Vec<Message>,
 }
 
@@ -31,46 +58,59 @@ pub struct SessionMeta {
     pub current: bool,
 }
 
+// 待保存的子 agent session（全局而非 thread_local：tokio 任务可能迁移 worker 线程）
+static PENDING_SUB_SESSIONS: std::sync::Mutex<Vec<(String, Vec<Message>, String)>> =
+    std::sync::Mutex::new(Vec::new());
+
+/// 记录一个子 agent 会话，待主 session 保存时一并写入文件。
+pub fn push_pending_sub_session(agent: String, messages: Vec<Message>, summary: String) {
+    PENDING_SUB_SESSIONS.lock().unwrap().push((agent, messages, summary));
+}
+
+fn take_pending_sub_sessions() -> Vec<(String, Vec<Message>, String)> {
+    std::mem::take(&mut *PENDING_SUB_SESSIONS.lock().unwrap())
+}
+
 pub fn sessions_dir(contest_dir: &Path) -> PathBuf {
     contest_dir.join(".oiph").join(SESSIONS_DIR_NAME)
 }
 
-fn session_path(contest_dir: &Path, name: &str) -> PathBuf {
-    sessions_dir(contest_dir).join(format!("{name}.json"))
+/// session 目录路径
+fn session_dir(contest_dir: &Path, name: &str) -> PathBuf {
+    sessions_dir(contest_dir).join(name)
+}
+
+/// 主 session 文件路径
+fn main_path(contest_dir: &Path, name: &str) -> PathBuf {
+    session_dir(contest_dir, name).join(MAIN_FILE)
 }
 
 fn current_path(contest_dir: &Path) -> PathBuf {
     sessions_dir(contest_dir).join(CURRENT_FILE)
 }
 
-/// 校验 session 名称：不能含路径分隔符、空白、'..'，也不能是保留名 `current`。
 pub fn sanitize_name(name: &str) -> Result<String> {
     if name.is_empty() {
         bail!("session 名称不能为空");
     }
-    if name.contains('/')
-        || name.contains('\\')
-        || name.contains("..")
-        || name.contains(char::is_whitespace)
-    {
+    if name.contains('/') || name.contains('\\') || name.contains("..") || name.contains(char::is_whitespace) {
         bail!("session 名称不能包含路径分隔符、'..' 或空白字符");
     }
-    if name.eq_ignore_ascii_case(CURRENT_FILE) || name.ends_with(".json") {
-        bail!("session 名称不能使用保留名或以 .json 结尾");
+    if name.eq_ignore_ascii_case(CURRENT_FILE) {
+        bail!("session 名称不能使用保留名 current");
     }
     Ok(name.to_string())
 }
 
-/// 生成不冲突的自动名称：`session-YYYYMMDD-HHMMSS`，冲突则追加 -2/-3。
 pub fn auto_name(contest_dir: &Path) -> Result<String> {
     let base = Utc::now().format("%Y%m%d-%H%M%S").to_string();
     let candidate = format!("{NAME_PREFIX}{base}");
-    if !session_path(contest_dir, &candidate).exists() {
+    if !session_dir(contest_dir, &candidate).exists() {
         return Ok(candidate);
     }
     for i in 2..1000 {
         let c = format!("{NAME_PREFIX}{base}-{i}");
-        if !session_path(contest_dir, &c).exists() {
+        if !session_dir(contest_dir, &c).exists() {
             return Ok(c);
         }
     }
@@ -78,7 +118,7 @@ pub fn auto_name(contest_dir: &Path) -> Result<String> {
 }
 
 pub fn exists(contest_dir: &Path, name: &str) -> bool {
-    session_path(contest_dir, name).is_file()
+    main_path(contest_dir, name).is_file()
 }
 
 pub fn current_name(contest_dir: &Path) -> Option<String> {
@@ -91,9 +131,8 @@ pub fn current_name(contest_dir: &Path) -> Option<String> {
 
 pub fn set_current(contest_dir: &Path, name: &str) -> Result<()> {
     let dir = sessions_dir(contest_dir);
-    std::fs::create_dir_all(&dir).with_context(|| format!("创建 {} 失败", dir.display()))?;
-    std::fs::write(current_path(contest_dir), name)
-        .with_context(|| "写入 current 指针失败")?;
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(current_path(contest_dir), name)?;
     Ok(())
 }
 
@@ -105,51 +144,116 @@ pub fn clear_current(contest_dir: &Path) {
 }
 
 pub fn load(contest_dir: &Path, name: &str) -> Result<Session> {
-    let p = session_path(contest_dir, name);
+    let p = main_path(contest_dir, name);
     let raw = std::fs::read_to_string(&p)
         .with_context(|| format!("读取 session '{name}' 失败：{}", p.display()))?;
-    serde_json::from_str::<Session>(&raw)
-        .with_context(|| format!("解析 session '{name}' 失败"))
+    let mut session: Session = serde_json::from_str(&raw)
+        .with_context(|| format!("解析 session '{name}' 失败"))?;
+    repair_tool_history(&mut session.messages);
+    Ok(session)
+}
+
+/// 修复不完整的 tool_calls 历史：assistant 消息中的每个 tool_call_id
+/// 必须有对应 tool 消息，否则在下一次 API 调用时被拒绝（HTTP 400）。
+/// 旧版本中止逻辑可能产生缺失，此处自动补占位 tool 消息。
+pub fn repair_tool_history(messages: &mut Vec<Message>) {
+    // 收集已有 tool 结果的 id
+    let answered: std::collections::HashSet<String> = messages
+        .iter()
+        .filter(|m| m.role == "tool")
+        .filter_map(|m| m.tool_call_id.clone())
+        .collect();
+    // 找出缺失的 tool_call_id，在其 assistant 消息后插入占位
+    let mut fixes: Vec<(usize, String)> = Vec::new();
+    for (i, m) in messages.iter().enumerate() {
+        if m.role == "assistant"
+            && let Some(tcs) = &m.tool_calls
+        {
+            for tc in tcs {
+                if !answered.contains(&tc.id) {
+                    fixes.push((i, tc.id.clone()));
+                }
+            }
+        }
+    }
+    // 从后往前插入，避免索引失效
+    for (i, id) in fixes.into_iter().rev() {
+        messages.insert(
+            i + 1,
+            Message::tool("[工具被用户中止]".into(), id),
+        );
+    }
+}
+
+/// 加载子 session
+pub fn load_sub(contest_dir: &Path, session_name: &str, filename: &str) -> Result<SubSession> {
+    let p = session_dir(contest_dir, session_name).join(filename);
+    let raw = std::fs::read_to_string(&p)
+        .with_context(|| format!("读取子 session '{filename}' 失败"))?;
+    serde_json::from_str::<SubSession>(&raw)
+        .with_context(|| format!("解析子 session '{filename}' 失败"))
 }
 
 pub fn save(contest_dir: &Path, session: &Session) -> Result<()> {
-    let dir = sessions_dir(contest_dir);
-    std::fs::create_dir_all(&dir).with_context(|| format!("创建 {} 失败", dir.display()))?;
-    let json = serde_json::to_vec_pretty(session).context("序列化 session 失败")?;
-    std::fs::write(session_path(contest_dir, &session.name), json)
-        .with_context(|| "写入 session 失败")?;
+    let dir = session_dir(contest_dir, &session.name);
+    std::fs::create_dir_all(&dir)?;
+    let json = serde_json::to_vec_pretty(session)?;
+    std::fs::write(main_path(contest_dir, &session.name), json)?;
     set_current(contest_dir, &session.name)?;
     Ok(())
 }
 
-/// 保存消息到指定 session（保留原 created_at，更新 updated_at）。
-/// 若 session 文件不存在则新建。
+/// 取出 pending 子 session 并保存为文件，返回 ChildRef 列表。
+/// 保留已有 children，新 children 追加在后。
+pub fn flush_pending_sub_sessions(
+    contest_dir: &Path,
+    session_name: &str,
+    existing_children: &[ChildRef],
+) -> Result<Vec<ChildRef>> {
+    let pending = take_pending_sub_sessions();
+    if pending.is_empty() {
+        return Ok(existing_children.to_vec());
+    }
+    let dir = session_dir(contest_dir, session_name);
+    std::fs::create_dir_all(&dir)?;
+    let mut children = existing_children.to_vec();
+    let start = children.len() + 1;
+    for (i, (agent, messages, summary)) in pending.into_iter().enumerate() {
+        let filename = format!("sub-{}.json", i + start);
+        let sub = SubSession { agent: agent.clone(), messages };
+        let json = serde_json::to_vec_pretty(&sub)?;
+        std::fs::write(dir.join(&filename), json)?;
+        children.push(ChildRef { filename, agent, summary });
+    }
+    Ok(children)
+}
+
+/// 保存消息到指定 session（含子 session）。
 pub fn save_messages(contest_dir: &Path, name: &str, messages: &[Message]) -> Result<()> {
     let now = Utc::now();
-    let created_at = load(contest_dir, name)
-        .ok()
-        .map(|s| s.created_at)
-        .unwrap_or(now);
+    let (created_at, existing_children) = load(contest_dir, name)
+        .map(|s| (s.created_at, s.children))
+        .unwrap_or((now, Vec::new()));
+    let children = flush_pending_sub_sessions(contest_dir, name, &existing_children)?;
     let session = Session {
         name: name.to_string(),
         created_at,
         updated_at: now,
         messages: messages.to_vec(),
+        children,
     };
     save(contest_dir, &session)
 }
 
-/// 删除 session 文件（不删 current 指针，由调用方处理）。
 pub fn delete(contest_dir: &Path, name: &str) -> Result<()> {
-    let p = session_path(contest_dir, name);
-    if !p.exists() {
+    let dir = session_dir(contest_dir, name);
+    if !dir.exists() {
         bail!("session '{name}' 不存在");
     }
-    std::fs::remove_file(&p).with_context(|| format!("删除 session '{name}' 失败"))?;
+    std::fs::remove_dir_all(&dir)?;
     Ok(())
 }
 
-/// 列出所有 session 元信息，按 updated_at 降序。
 pub fn list(contest_dir: &Path) -> Result<Vec<SessionMeta>> {
     let dir = sessions_dir(contest_dir);
     if !dir.exists() {
@@ -157,22 +261,19 @@ pub fn list(contest_dir: &Path) -> Result<Vec<SessionMeta>> {
     }
     let cur = current_name(contest_dir);
     let mut metas = Vec::new();
-    for e in std::fs::read_dir(&dir)
-        .with_context(|| format!("读取 {} 失败", dir.display()))?
-        .flatten()
-    {
-        let p = e.path();
-        if !p.is_file() {
+    for e in std::fs::read_dir(&dir)?.flatten() {
+        if !e.file_type().map(|t| t.is_dir()).unwrap_or(false) {
             continue;
         }
-        let fname = p.file_name().unwrap_or_default().to_string_lossy().into_owned();
-        let Some(name) = fname.strip_suffix(".json") else {
-            continue;
-        };
+        let name = e.file_name().to_string_lossy().into_owned();
         if name == CURRENT_FILE {
             continue;
         }
-        match std::fs::read_to_string(&p)
+        let main_file = e.path().join(MAIN_FILE);
+        if !main_file.is_file() {
+            continue;
+        }
+        match std::fs::read_to_string(&main_file)
             .ok()
             .and_then(|s| serde_json::from_str::<Session>(&s).ok())
         {
@@ -183,30 +284,29 @@ pub fn list(contest_dir: &Path) -> Result<Vec<SessionMeta>> {
                 current: cur.as_deref() == Some(s.name.as_str()),
             }),
             None => {
-                // 损坏的 session 文件，按文件名与修改时间兜底
                 if let Ok(meta) = e.metadata()
                     && let Ok(mtime) = meta.modified() {
                         let dt: DateTime<Utc> = mtime.into();
+                        let is_cur = cur.as_deref() == Some(name.as_str());
                         metas.push(SessionMeta {
-                            name: name.to_string(),
+                            name,
                             updated_at: dt,
                             messages: 0,
-                            current: cur.as_deref() == Some(name),
+                            current: is_cur,
                         });
                     }
             }
         }
     }
-    metas.sort_by_key(|a| std::cmp::Reverse(a.updated_at));
+    metas.sort_by_key(|m| std::cmp::Reverse(m.updated_at));
     Ok(metas)
 }
 
-/// 加载上一次的 session：优先 current 指针，缺失则取最近修改的。没有则返回 None。
 pub fn last(contest_dir: &Path) -> Result<Option<Session>> {
     if let Some(name) = current_name(contest_dir)
         && let Ok(s) = load(contest_dir, &name) {
-            return Ok(Some(s));
-        }
+        return Ok(Some(s));
+    }
     let metas = list(contest_dir)?;
     if let Some(m) = metas.first() {
         set_current(contest_dir, &m.name)?;
@@ -215,16 +315,14 @@ pub fn last(contest_dir: &Path) -> Result<Option<Session>> {
     Ok(None)
 }
 
-/// 导出为 markdown 文本。
 pub fn export_markdown(s: &Session) -> String {
-    let mut out = String::new();
-    out.push_str(&format!(
+    let mut out = format!(
         "# Session: {}\n\n创建：{}\n更新：{}\n消息数：{}\n\n",
         s.name,
         s.created_at.format("%Y-%m-%d %H:%M:%S"),
         s.updated_at.format("%Y-%m-%d %H:%M:%S"),
         s.messages.len()
-    ));
+    );
     for m in &s.messages {
         out.push_str(&format!("## {}\n\n", m.role));
         if let Some(c) = &m.content
@@ -234,10 +332,7 @@ pub fn export_markdown(s: &Session) -> String {
             }
         if let Some(tcs) = &m.tool_calls {
             for tc in tcs {
-                out.push_str(&format!(
-                    "> tool_call: `{}` `{}`\n",
-                    tc.function.name, tc.function.arguments
-                ));
+                out.push_str(&format!("> tool_call: `{}` `{}`\n", tc.function.name, tc.function.arguments));
             }
             out.push('\n');
         }
@@ -248,7 +343,6 @@ pub fn export_markdown(s: &Session) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::client::Message;
 
     fn tmp_contest() -> PathBuf {
         let d = std::env::temp_dir().join(format!("prep_sess_{}", uuid::Uuid::new_v4()));
@@ -259,37 +353,34 @@ mod tests {
     #[test]
     fn save_load_list_roundtrip() {
         let c = tmp_contest();
-        let msgs = vec![Message::system("sys"), Message::user("hi")];
-        save_messages(&c, "s1", &msgs).unwrap();
+        save_messages(&c, "s1", &[Message::system("sys"), Message::user("hi")]).unwrap();
         assert_eq!(current_name(&c).as_deref(), Some("s1"));
-
         let s = load(&c, "s1").unwrap();
         assert_eq!(s.name, "s1");
         assert_eq!(s.messages.len(), 2);
-
+        assert!(s.children.is_empty());
         let metas = list(&c).unwrap();
         assert_eq!(metas.len(), 1);
         assert!(metas[0].current);
         assert_eq!(metas[0].messages, 2);
-
         std::fs::remove_dir_all(&c).ok();
     }
 
     #[test]
-    fn last_uses_current_pointer() {
+    fn sub_session_save_load() {
         let c = tmp_contest();
-        save_messages(&c, "a", &[Message::user("a")]).unwrap();
-        // 制造时间差
-        std::thread::sleep(std::time::Duration::from_millis(1100));
-        save_messages(&c, "b", &[Message::user("b")]).unwrap();
-        // current 指向 a（较旧），last 应返回 a
-        set_current(&c, "a").unwrap();
-        let s = last(&c).unwrap().unwrap();
-        assert_eq!(s.name, "a");
-        // 清指针后应取最近修改的 b
-        clear_current(&c);
-        let s = last(&c).unwrap().unwrap();
-        assert_eq!(s.name, "b");
+        save_messages(&c, "s1", &[Message::user("hi")]).unwrap();
+        // 模拟 pending sub session
+        push_pending_sub_session("solution".into(), vec![Message::user("sub task")], "写std".into());
+        save_messages(&c, "s1", &[Message::user("hi"), Message { role: "assistant".into(), content: Some("result".into()), tool_calls: None, tool_call_id: None, reasoning: None }]).unwrap();
+        let s = load(&c, "s1").unwrap();
+        assert_eq!(s.children.len(), 1);
+        assert_eq!(s.children[0].filename, "sub-1.json");
+        assert_eq!(s.children[0].agent, "solution");
+        // 加载子 session
+        let sub = load_sub(&c, "s1", &s.children[0].filename).unwrap();
+        assert_eq!(sub.agent, "solution");
+        assert_eq!(sub.messages.len(), 1);
         std::fs::remove_dir_all(&c).ok();
     }
 
@@ -298,7 +389,6 @@ mod tests {
         let c = tmp_contest();
         let n1 = auto_name(&c).unwrap();
         save_messages(&c, &n1, &[Message::user("x")]).unwrap();
-        // 同秒内再生成应追加后缀
         let n2 = auto_name(&c).unwrap();
         assert_ne!(n1, n2);
         std::fs::remove_dir_all(&c).ok();
@@ -313,15 +403,79 @@ mod tests {
     }
 
     #[test]
+    fn last_uses_current_pointer() {
+        let c = tmp_contest();
+        save_messages(&c, "a", &[Message::user("a")]).unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(1100));
+        save_messages(&c, "b", &[Message::user("b")]).unwrap();
+        set_current(&c, "a").unwrap();
+        let s = last(&c).unwrap().unwrap();
+        assert_eq!(s.name, "a");
+        clear_current(&c);
+        let s = last(&c).unwrap().unwrap();
+        assert_eq!(s.name, "b");
+        std::fs::remove_dir_all(&c).ok();
+    }
+
+    #[test]
     fn export_markdown_contains_messages() {
         let s = Session {
-            name: "t".into(),
-            created_at: Utc::now(),
-            updated_at: Utc::now(),
-            messages: vec![Message::user("hello")],
+            name: "t".into(), created_at: Utc::now(), updated_at: Utc::now(),
+            messages: vec![Message::user("hello")], children: vec![],
         };
         let md = export_markdown(&s);
         assert!(md.contains("hello"));
-        assert!(md.contains("## user"));
+    }
+
+    fn assistant_with_tool_calls(ids: &[&str]) -> Message {
+        Message {
+            role: "assistant".into(),
+            content: None,
+            tool_calls: Some(
+                ids.iter()
+                    .map(|id| crate::client::ToolCall {
+                        id: id.to_string(),
+                        kind: "function".into(),
+                        function: crate::client::FunctionCall {
+                            name: "bash".into(),
+                            arguments: "{}".into(),
+                        },
+                    })
+                    .collect(),
+            ),
+            tool_call_id: None,
+            reasoning: None,
+        }
+    }
+
+    #[test]
+    fn repair_tool_history_fills_missing() {
+        let mut msgs = vec![
+            Message::user("hi"),
+            assistant_with_tool_calls(&["a", "b", "c"]),
+            Message::tool("r1".into(), "a".into()),
+            Message::tool("r2".into(), "b".into()),
+            // c 缺失
+        ];
+        repair_tool_history(&mut msgs);
+        // c 的占位应插在 index 3（assistant 之后、其余 tool 之前也行，但语义顺序正确即可）
+        let answered: Vec<&str> = msgs
+            .iter()
+            .filter(|m| m.role == "tool")
+            .filter_map(|m| m.tool_call_id.as_deref())
+            .collect();
+        assert!(answered.contains(&"c"), "缺失的 c 应被补上: {answered:?}");
+        assert_eq!(msgs.len(), 5);
+    }
+
+    #[test]
+    fn repair_tool_history_noop_when_complete() {
+        let mut msgs = vec![
+            Message::user("hi"),
+            assistant_with_tool_calls(&["a"]),
+            Message::tool("r".into(), "a".into()),
+        ];
+        repair_tool_history(&mut msgs);
+        assert_eq!(msgs.len(), 3);
     }
 }

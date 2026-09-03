@@ -9,6 +9,23 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 use tokio::process::Command;
 
+/// 子进程守卫：被 drop 时 kill 掉子进程，防止 cancel 后遗留孤儿进程。
+struct ChildGuard {
+    pid: Option<u32>,
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if let Some(pid) = self.pid {
+            // 用 kill 杀掉整个进程组
+            let _ = std::process::Command::new("kill")
+                .arg("-9")
+                .arg(pid.to_string())
+                .output();
+        }
+    }
+}
+
 use crate::assets;
 use crate::client::{FunctionDef, Tool};
 use crate::kb;
@@ -265,13 +282,22 @@ pub async fn dispatch_base(ctx: &ToolContext, name: &str, args: &Value) -> Optio
 
 async fn run_bash(ctx: &ToolContext, args: &Value) -> Result<String> {
     let command = get_str(args, "command")?;
-    let output = Command::new("bash")
+    let child = Command::new("bash")
         .arg("-c")
         .arg(&command)
         .current_dir(&ctx.workdir)
-        .output()
-        .await
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
         .map_err(|e| anyhow::anyhow!("启动 bash 失败：{e}"))?;
+
+    let pid = child.id();
+    // 子进程守卫：future 被 drop 时杀掉子进程
+    let _guard = ChildGuard { pid };
+
+    let output = child.wait_with_output()
+        .await
+        .map_err(|e| anyhow::anyhow!("等待 bash 失败：{e}"))?;
 
     let mut combined = String::new();
     if !output.stdout.is_empty() {

@@ -67,7 +67,7 @@ export function ProblemArea({
         ))}
         {activeTab === '题解' && (
           <div style={{ height: '500px' }}>
-            <MarkdownEditor pid={problem.id} filePath="statement/tutorial.md" />
+            <MarkdownEditor pid={problem.id} filePath="tutorial/zh_cn.md" />
           </div>
         )}
         {activeTab === '数据' && <DataTab problem={problem} />}

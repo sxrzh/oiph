@@ -6,10 +6,12 @@ export function SessionBar({
   sessions,
   current,
   onSwitched,
+  onMessagesLoaded,
 }: {
   sessions: SessionInfo[];
   current: string | null;
   onSwitched: () => void;
+  onMessagesLoaded: (messages: any[], children: any[]) => void;
 }) {
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState('');
@@ -28,6 +30,8 @@ export function SessionBar({
   const handleSwitch = async (n: string) => {
     const r = await switchSession(n);
     if (r.ok) {
+      // 直接渲染返回的历史消息
+      if (onMessagesLoaded) onMessagesLoaded(r.messages ?? [], r.children ?? []);
       onSwitched();
     } else {
       alert(r.error);

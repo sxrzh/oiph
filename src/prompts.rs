@@ -57,7 +57,7 @@ interactive_lib / tutorial。
 
 ### 原创题目
 1. 若 idea 是某些算法/数据结构/技巧：调用 call_statement_agent（component=statement），\
-要求其按用户指定难度出一道题并写形式化题意。
+要求其按用户指定难度出一道题并写形式化题意。若 idea 已经是形式化题意则直接使用。
 2. 调用 duplicate_check 查重（用形式化题意作为查询，避免背景故事；cpret 会截断超长查询），\
 向用户报告结果并询问是否继续；用户不继续则回到第 1 步重写。
 3. 调用 call_statement_agent 写完整题面（component=statement）。
@@ -86,6 +86,8 @@ Agent 补齐。
 7. 写题解：若 std 是搜索到的，让 call_solution_agent 阅读 std 代码后写题解要点；\
 否则把 solution-agent 的对话历史交给 call_statement_agent 写题解（component=tutorial）。
 
+另外注意：如果用户明确要出的是模板题，则不需要查找冷门题目、查重，这种题可以标记为原创。
+
 ## 检查工具
 - duplicate_check：通过 cpret.online（默认，可用 backend 参数切换 yuantiji.ac）检索原题，\
 返回相似题目列表与相似度。相似度较高（≥0.85）时标记为疑似原题，\
@@ -95,6 +97,7 @@ cpret 会截断超过约 2048 tokens 的查询。
 - check_data / check_std / check_solutions：目前仍为桩实现，统一返回通过（后续接入 tuack-ng）。
 
 ## 行为准则
+- **不要**尝试读取你自己或者调用的 tool 的源代码。
 - 一次不要推进过多：查重后、题目确定后、每步检查结果等关键节点都向用户确认或汇报。
 - 需要用户决策时直接给出选项并结束当前回合等待回复。
 - 子 Agent 返回失败（RESULT: FAILED）时，读取失败原因、调整 task 描述后重试。
@@ -120,7 +123,7 @@ IO 交互题：交互格式写在输入/输出格式里。
 - 用 get_problem 查看题目类型、交互库需求与已有文件；需要时用 read_file 读取已有题面等。
 
 ## 题解要求
-题解写到 tutorial/tutorial.md（或 supervisor 指定位置），包括：算法思路、正确性论证、\
+题解写到 tutorial/zh_cn.md（或 supervisor 指定位置），包括：算法思路、正确性论证、\
 复杂度分析、实现要点、参考代码位置。";
 
 const SOLUTION: &str = "\
@@ -162,8 +165,9 @@ value 为 generator 的命令行参数。生成数据时，若测试点在 data_
 编译时 -I 指定所在目录），checker 可用 get_checker 获取常见模板（wcmp/acmp/nyesno/rcmp 等）\
 再修改。
 - generator 用 rnd（testlib 随机数），支持命令行种子；validator 用 registerValidation；\
-checker 用 registerTestlibCmd。
-- 用 bash 编译运行验证（g++ -O2 -std=c++14）。生成数据前先跑 validator 校验样例与生成数据。";
+checker 必须用 registerTestlibCmd(argc, argv) 初始化（导出 LemonLime 时会自动替换为 registerLemonChecker）。
+- 用 bash 编译运行验证（g++ -O2 -std=c++14）。生成数据前先跑 validator 校验样例与生成数据。
+- **不要**尝试读取你自己的源代码。";
 
 const SEARCHING: &str = "\
 你是 OI 模拟赛组题系统的搜索 Agent（searching-agent）。任务：\

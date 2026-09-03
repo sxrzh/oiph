@@ -133,6 +133,9 @@ enum KbCmd {
         /// 添加到全局知识库（~/.oiph/kb），默认添加到工程知识库（工程目录下 .oiph/kb）。
         #[arg(short = 'g', long)]
         global: bool,
+        /// 自定义来源标签（默认为文件绝对路径）。
+        #[arg(long)]
+        source: Option<String>,
     },
     /// 列出知识库内容（全局与工程）。
     List,
@@ -291,7 +294,6 @@ async fn run_gui(cli: &Cli) -> Result<()> {
     )?);
     let contest_dir = resolve_contest(&app.root, cli.contest.as_deref());
     app.set_contest_dir(contest_dir);
-    seed_builtin(&app).await;
     server::serve(app, cli.port).await
 }
 
@@ -326,7 +328,7 @@ fn kb_target_dir(root: &Path, cli_contest: Option<&str>, global: bool) -> PathBu
 async fn run_kb_cmd(cli: &Cli, cmd: &KbCmd) -> Result<()> {
     let root = std::env::current_dir()?;
     match cmd {
-        KbCmd::Add { path, global } => {
+        KbCmd::Add { path, global, source } => {
             require_api_key_for_embeddings(cli.embedding_model.as_deref(), cli.api_key.as_deref())?;
             let dir = kb_target_dir(&root, cli.contest.as_deref(), *global);
             kb::cmd_add(
@@ -335,6 +337,7 @@ async fn run_kb_cmd(cli: &Cli, cmd: &KbCmd) -> Result<()> {
                 &cli.base_url,
                 cli.api_key.as_deref().unwrap_or(""),
                 cli.embedding_model.as_deref(),
+                source.as_deref(),
             )
             .await
         }
@@ -469,6 +472,7 @@ fn run_session_cmd(cli: &Cli, cmd: &SessionCmd) -> Result<()> {
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 messages: Vec::new(),
+                children: vec![],
             };
             session::save(&cdir, &s)?;
             println!("已新建并切换到会话 '{name}'");
@@ -576,37 +580,6 @@ fn require_api_key_for_embeddings(embed_model: Option<&str>, api_key: Option<&st
 
 /// 启动时把内置知识库文档种子到全局知识库（~/.oiph/kb），内置 skills 种子到
 /// 全局 skills（~/.oiph/skills）。已存在的跳过。
-async fn seed_builtin(app: &App) {
-    // 知识库：provider embedding 且无 key 时跳过（本地哈希 embedding 无需 key）
-    if app.embed_model.is_none() || !app.api_key.is_empty() {
-        match kb::ensure_builtin(
-            &paths::global_kb_dir(),
-            assets::KB_DOCS,
-            &app.base_url,
-            &app.api_key,
-            app.embed_model.as_deref(),
-        )
-        .await
-        {
-            Ok(0) => {}
-            Ok(n) => println!(
-                "已将 {} 篇内置知识库文档种子到 {}",
-                n,
-                paths::global_kb_dir().display()
-            ),
-            Err(e) => eprintln!("内置知识库种子失败：{e:#}"),
-        }
-    }
-    match skills::ensure_builtin(&paths::global_skills_dir(), assets::BUILTIN_SKILLS) {
-        Ok(0) => {}
-        Ok(n) => println!(
-            "已写入 {n} 个内置 skill 到 {}",
-            paths::global_skills_dir().display()
-        ),
-        Err(e) => eprintln!("内置 skills 种子失败：{e:#}"),
-    }
-}
-
 async fn run_repl(cli: &Cli, root: &Path) -> Result<()> {
     let dup_backend = dupcheck::Backend::parse(&cli.dup_backend)
         .unwrap_or(dupcheck::Backend::Cpret);
@@ -623,7 +596,6 @@ async fn run_repl(cli: &Cli, root: &Path) -> Result<()> {
     let contest_dir = resolve_contest(root, cli.contest.as_deref());
     app.set_contest_dir(contest_dir.clone());
 
-    seed_builtin(&app).await;
 
     let tty = io::stdin().is_terminal();
 
@@ -1048,6 +1020,7 @@ async fn handle_slash_kb(app: &App, args: &[&str]) -> Result<()> {
                 &app.base_url,
                 &app.api_key,
                 app.embed_model.as_deref(),
+                None,
             )
             .await
         }
@@ -1133,6 +1106,7 @@ async fn handle_slash_session(
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
                 messages: messages.clone(),
+                children: vec![],
             };
             session::save(&cdir, &s)?;
             *current_session = Some(name.clone());

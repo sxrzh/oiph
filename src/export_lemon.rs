@@ -112,8 +112,12 @@ fn build_task(
     let mut special_judge = String::new();
     if is_spj {
         let spj_dst = pdata_dir.join("spj.cpp");
-        std::fs::copy(&checker_path, &spj_dst)
-            .with_context(|| format!("拷贝 checker.cpp 到 {} 失败", spj_dst.display()))?;
+        // 读取 checker.cpp，替换 registerTestlibCmd → registerLemonChecker，写入 spj.cpp
+        let checker_src = std::fs::read_to_string(&checker_path)
+            .with_context(|| format!("读取 checker.cpp 失败：{}", checker_path.display()))?;
+        let spj_src = checker_src.replace("registerTestlibCmd", "registerLemonChecker");
+        std::fs::write(&spj_dst, &spj_src)
+            .with_context(|| format!("写入 spj.cpp 失败：{}", spj_dst.display()))?;
         // 拷贝 lemon 兼容的 testlib.h
         std::fs::write(pdata_dir.join("testlib.h"), crate::assets::LEMON_TESTLIB_H)?;
         special_judge = format!("{pid}/spj.exe");

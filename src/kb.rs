@@ -279,10 +279,14 @@ pub async fn cmd_add(
     base_url: &str,
     api_key: &str,
     embed_model: Option<&str>,
+    label: Option<&str>,
 ) -> Result<()> {
     let text = std::fs::read_to_string(source)
         .with_context(|| format!("读取文件 '{source}' 失败"))?;
-    let n = add_document(dir, &display_source(source), &text, base_url, api_key, embed_model).await?;
+    let source_label = label
+        .map(String::from)
+        .unwrap_or_else(|| display_source(source));
+    let n = add_document(dir, &source_label, &text, base_url, api_key, embed_model).await?;
     println!("已向 {} 添加 {n} 个分块", dir.display());
     Ok(())
 }
@@ -322,62 +326,6 @@ pub fn cmd_clear(dir: &Path) -> Result<()> {
     clear_dir(dir)?;
     println!("知识库 '{}' 已清空", dir.display());
     Ok(())
-}
-
-// ---------- 内置文档种子 ----------
-
-/// 将内置文档（assets/kb/*）写入全局知识库目录（按 source 去重），返回新增分块数。
-pub async fn ensure_builtin(
-    dir: &Path,
-    docs: &[(&str, &str)],
-    base_url: &str,
-    api_key: &str,
-    embed_model: Option<&str>,
-) -> Result<usize> {
-    let backend = backend_of(embed_model);
-    let dim = backend_dim(&backend);
-    let mut kb = match load_dir(dir)? {
-        Some(k) => {
-            anyhow::ensure!(
-                k.backend == backend,
-                "全局知识库使用后端 '{}'，当前配置 '{}'",
-                k.backend,
-                backend
-            );
-            k
-        }
-        None => Kb {
-            backend: backend.clone(),
-            dim,
-            chunks: Vec::new(),
-        },
-    };
-    let mut added = 0usize;
-    for (name, content) in docs {
-        let source = format!("assets/kb/{name}");
-        if kb.chunks.iter().any(|c| c.source == source) {
-            continue;
-        }
-        let pieces = chunk_text(content);
-        if pieces.is_empty() {
-            continue;
-        }
-        let vectors =
-            embed_texts(&backend, &pieces, dim, base_url, api_key, embed_model).await?;
-        for (chunk_id, (text, vector)) in pieces.into_iter().zip(vectors).enumerate() {
-            kb.chunks.push(KbChunk {
-                source: source.clone(),
-                chunk_id,
-                text,
-                vector,
-            });
-        }
-        added += 1;
-    }
-    if added > 0 {
-        save_dir(&kb, dir)?;
-    }
-    Ok(added)
 }
 
 // ---------- 检索 ----------
@@ -542,27 +490,5 @@ mod tests {
         assert!(out.contains("Eiffel Tower"), "got: {out}");
         std::fs::remove_dir_all(&d1).ok();
         std::fs::remove_dir_all(&d2).ok();
-    }
-
-    #[tokio::test]
-    async fn ensure_builtin_seeds_once() {
-        let dir = std::env::temp_dir().join(format!("prep_seed_{}", uuid::Uuid::new_v4()));
-        let docs = [("a.md", "Eiffel Tower is in Paris."), ("b.md", "Rust is a systems language.")];
-        assert_eq!(
-            ensure_builtin(&dir, &docs, "http://localhost:1/v1", "test", None)
-                .await
-                .unwrap(),
-            2
-        );
-        // 再次调用不重复
-        assert_eq!(
-            ensure_builtin(&dir, &docs, "http://localhost:1/v1", "test", None)
-                .await
-                .unwrap(),
-            0
-        );
-        let out = search(&cfg_with(vec![dir.clone()]), "Paris", 2).await.unwrap();
-        assert!(out.contains("assets/kb/a.md"), "got: {out}");
-        std::fs::remove_dir_all(&dir).ok();
     }
 }

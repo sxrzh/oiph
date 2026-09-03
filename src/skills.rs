@@ -149,22 +149,6 @@ fn truncate(s: &str) -> String {
     }
 }
 
-/// 把内置 skills 写入全局目录（已存在则跳过），返回写入数量。
-pub fn ensure_builtin(dir: &Path, builtin: &[(&str, &str)]) -> Result<usize> {
-    let mut n = 0;
-    for (name, content) in builtin {
-        let f = dir.join(name).join(SKILL_FILE);
-        if f.exists() {
-            continue;
-        }
-        std::fs::create_dir_all(f.parent().expect("skill 路径有父目录"))?;
-        std::fs::write(&f, content)
-            .with_context(|| format!("写入内置 skill '{name}' 失败"))?;
-        n += 1;
-    }
-    Ok(n)
-}
-
 /// 生成嵌入系统提示词的 skills 清单段。空列表返回空串。
 pub fn prompt_section(skills: &[Skill]) -> String {
     if skills.is_empty() {
@@ -241,17 +225,6 @@ description: Review Rust code for correctness.
         std::fs::remove_dir_all(&g).ok();
         std::fs::remove_dir_all(&p).ok();
     }
-
-    #[test]
-    fn ensure_builtin_writes_once() {
-        let d = std::env::temp_dir().join(format!("prep_bi_{}", uuid::Uuid::new_v4()));
-        let docs = [("demo", "---\nname: demo\ndescription: d\n---\nhi")];
-        assert_eq!(ensure_builtin(&d, &docs).unwrap(), 1);
-        assert_eq!(ensure_builtin(&d, &docs).unwrap(), 0);
-        assert!(d.join("demo").join(SKILL_FILE).is_file());
-        std::fs::remove_dir_all(&d).ok();
-    }
-
     #[test]
     fn prompt_section_lists_skills() {
         let skills = vec![Skill {

@@ -74,6 +74,7 @@ pub async fn serve(app: Arc<App>, port: u16) -> anyhow::Result<()> {
         .route("/api/session/new", post(new_session))
         .route("/api/session/switch", post(switch_session))
         .route("/api/session/export", post(export_session))
+        .route("/api/session/sub", get(get_sub_session))
         .route("/api/export/lemon", post(export_lemon))
         .route("/api/test", post(run_test))
         .route("/api/kb/search", post(kb_search))
@@ -294,6 +295,7 @@ async fn new_session(
         created_at: chrono::Utc::now(),
         updated_at: chrono::Utc::now(),
         messages: vec![agent::system_message_for(Role::Supervisor, &st.app)],
+        children: vec![],
     };
     let _ = session_mod::save(d, &s);
     *st.messages.lock().await = s.messages.clone();
@@ -335,9 +337,14 @@ async fn switch_session(
                     })
                 })
                 .collect();
+            let children_json: Vec<Value> = s.children.iter().map(|c| json!({
+                "filename": c.filename,
+                "agent": c.agent,
+                "summary": c.summary,
+            })).collect();
             *st.messages.lock().await = msgs;
             *st.current_session.lock().await = Some(req.name.clone());
-            Json(json!({ "ok": true, "name": req.name, "messages": messages_json }))
+            Json(json!({ "ok": true, "name": req.name, "messages": messages_json, "children": children_json }))
         }
         Err(e) => Json(json!({ "error": format!("{e:#}") })),
     }
@@ -413,6 +420,31 @@ async fn handle_ws(mut socket: WebSocket, st: Arc<ServerState>) {
     let agent_task = tokio::spawn(async move {
         while let Some(user_text) = rx_chat.recv().await {
             crate::term::set_ws_sender(Some(tx_agent.as_ref().clone()));
+            // 确保 session 存在，不存在则自动创建
+            {
+                let sess = st_agent.current_session.lock().await;
+                if sess.is_none() {
+                    drop(sess);
+                    let mut sess = st_agent.current_session.lock().await;
+                    if sess.is_none()
+                        && let Some(cdir) = st_agent.app.contest_dir()
+                            && let Ok(name) = session_mod::auto_name(&cdir) {
+                                let s = session_mod::Session {
+                                    name: name.clone(),
+                                    created_at: chrono::Utc::now(),
+                                    updated_at: chrono::Utc::now(),
+                                    messages: vec![agent::system_message_for(Role::Supervisor, &st_agent.app)],
+                                    children: vec![],
+                                };
+                                let _ = session_mod::save(&cdir, &s);
+                                *sess = Some(name.clone());
+                                let _ = tx_agent.send(json!({
+                                    "type": "session_created",
+                                    "name": name,
+                                }).to_string());
+                            }
+                }
+            }
             {
                 let mut msgs = st_agent.messages.lock().await;
                 msgs[0] = agent::system_message_for(Role::Supervisor, &st_agent.app);
@@ -457,14 +489,26 @@ async fn handle_ws(mut socket: WebSocket, st: Arc<ServerState>) {
                 }
             }
             save_session(&st_agent).await;
-            // 发送消息列表更新
+            // 发送消息列表更新（含子 session 引用）
             let msgs = st_agent.messages.lock().await;
+            let session_name = st_agent.current_session.lock().await.clone();
+            let children: Vec<Value> = match &session_name {
+                Some(n) => match session_mod::load(&st_agent.app.contest_dir().unwrap_or_else(|| st_agent.app.root.clone()), n) {
+                    Ok(s) => s.children.iter().map(|c| json!({
+                        "filename": c.filename,
+                        "agent": c.agent,
+                        "summary": c.summary,
+                    })).collect(),
+                    Err(_) => vec![],
+                },
+                None => vec![],
+            };
             let messages_json: Vec<Value> = msgs
                 .iter()
                 .map(|m| json!({"role": m.role, "content": m.content, "tool_calls": m.tool_calls}))
                 .collect();
             let _ = tx_agent.send(
-                json!({ "type": "messages", "messages": messages_json }).to_string(),
+                json!({ "type": "messages", "messages": messages_json, "children": children, "session_name": session_name }).to_string(),
             );
         }
     });
@@ -508,11 +552,15 @@ async fn save_session(st: &ServerState) {
     let cdir = st.app.contest_dir();
     let Some(d) = &cdir else { return };
     let msgs = st.messages.lock().await;
-    let sess = st.current_session.lock().await;
+    let mut sess = st.current_session.lock().await;
     let name = match sess.clone() {
         Some(n) => n,
         None => match session_mod::auto_name(d) {
-            Ok(n) => n,
+            Ok(n) => {
+                // 写回状态，避免下一轮重复创建 session
+                *sess = Some(n.clone());
+                n
+            }
             Err(_) => return,
         },
     };
@@ -545,6 +593,33 @@ async fn export_session(
     };
     match session_mod::load(d, &name) {
         Ok(s) => Json(json!({ "markdown": session_mod::export_markdown(&s) })),
+        Err(e) => Json(json!({ "error": format!("{e:#}") })),
+    }
+}
+
+#[derive(Deserialize)]
+struct SubSessionReq {
+    session: String,
+    filename: String,
+}
+
+async fn get_sub_session(
+    State(st): State<Arc<ServerState>>,
+    axum::extract::Query(req): axum::extract::Query<SubSessionReq>,
+) -> impl IntoResponse {
+    let cdir = st.app.contest_dir();
+    let Some(d) = &cdir else {
+        return Json(json!({ "error": "无比赛工程" }));
+    };
+    match session_mod::load_sub(d, &req.session, &req.filename) {
+        Ok(sub) => {
+            let messages: Vec<Value> = sub.messages.iter().map(|m| json!({
+                "role": m.role,
+                "content": m.content,
+                "tool_calls": m.tool_calls,
+            })).collect();
+            Json(json!({ "agent": sub.agent, "messages": messages }))
+        }
         Err(e) => Json(json!({ "error": format!("{e:#}") })),
     }
 }

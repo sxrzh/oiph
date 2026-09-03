@@ -1,19 +1,34 @@
 import { useEffect, useRef, useState } from 'react';
+import { Spoiler } from './Spoiler';
 
 interface DisplayMessage {
   role: string;
   content: string;
   toolCalls?: string;
-  reasoning?: string;
+}
+
+interface ChildSession {
+  filename: string;
+  agent: string;
+  summary: string;
+}
+
+interface SubMessage {
+  role: string;
+  content: string | null;
 }
 
 export function ChatArea({
   messages,
+  children,
+  sessionName,
   streaming,
   onSend,
   onStop,
 }: {
   messages: DisplayMessage[];
+  children: ChildSession[];
+  sessionName: string | null;
   streaming: boolean;
   onSend: (text: string) => void;
   onStop: () => void;
@@ -31,12 +46,23 @@ export function ChatArea({
     setInput('');
   };
 
+  let childIndex = 0;
+
   return (
     <>
       <div className="chat-area" ref={chatRef}>
-        {messages.map((msg, i) => (
-          <ChatMessageView key={i} msg={msg} />
-        ))}
+        {messages.map((msg, i) => {
+          const isSubAgentResult = msg.role === 'tool' && msg.content.includes('[sub-session]');
+          let child: ChildSession | null = null;
+          if (isSubAgentResult && childIndex < children.length) {
+            child = children[childIndex++];
+          }
+          // 思维链消息用 spoiler 包裹
+          if (msg.role === 'reasoning') {
+            return <ReasoningMessageView key={i} content={msg.content} />;
+          }
+          return <ChatMessageView key={i} msg={msg} child={child} sessionName={sessionName} />;
+        })}
       </div>
       <div className="input-area">
         <textarea
@@ -44,10 +70,7 @@ export function ChatArea({
           value={input}
           onChange={e => setInput(e.target.value)}
           onKeyDown={e => {
-            if (e.key === 'Enter' && !e.shiftKey) {
-              e.preventDefault();
-              handleSend();
-            }
+            if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }
           }}
           placeholder="输入消息... (Enter 发送, Shift+Enter 换行)"
           rows={1}
@@ -62,19 +85,75 @@ export function ChatArea({
   );
 }
 
-function ChatMessageView({ msg }: { msg: DisplayMessage }) {
+function ReasoningMessageView({ content }: { content: string }) {
+  return (
+    <div className="msg reasoning" style={{ background: 'var(--bg-tab)', maxWidth: '85%', alignSelf: 'flex-start' }}>
+      <Spoiler title={`🧠 思维链（${content.length} 字符）`} defaultOpen={false}>
+        <div style={{ whiteSpace: 'pre-wrap', fontSize: 12, color: 'var(--fg-muted)', maxHeight: '400px', overflow: 'auto' }}>
+          {content}
+        </div>
+      </Spoiler>
+    </div>
+  );
+}
+
+function ChatMessageView({
+  msg,
+  child,
+  sessionName,
+}: {
+  msg: DisplayMessage;
+  child: ChildSession | null;
+  sessionName: string | null;
+}) {
   const roleTag = msg.role === 'user' ? '你' :
     msg.role === 'assistant' ? 'Supervisor' :
     msg.role === 'tool' ? '工具' :
-    msg.role === 'reasoning' ? '思维链' : msg.role;
+    msg.role === 'system' ? '系统' : msg.role;
+  const displayContent = msg.content.replace('[sub-session]', '').trim();
 
   return (
     <div className={`msg ${msg.role}`}>
       <div className="role-tag">{roleTag}</div>
       <div className="text">
-        {msg.content}
+        {displayContent}
         {msg.toolCalls && <div className="tool-call" style={{ marginTop: '4px' }}>{msg.toolCalls}</div>}
+        {child && sessionName && (
+          <SubSessionSpoiler child={child} sessionName={sessionName} />
+        )}
       </div>
     </div>
+  );
+}
+
+function SubSessionSpoiler({ child, sessionName }: { child: ChildSession; sessionName: string }) {
+  const [loaded, setLoaded] = useState(false);
+  const [messages, setMessages] = useState<SubMessage[]>([]);
+
+  const loadSub = async () => {
+    if (loaded) return;
+    try {
+      const r = await fetch(`/api/session/sub?session=${encodeURIComponent(sessionName)}&filename=${encodeURIComponent(child.filename)}`);
+      const d = await r.json();
+      if (d.messages) setMessages(d.messages);
+      setLoaded(true);
+    } catch {
+      setLoaded(true);
+    }
+  };
+
+  return (
+    <Spoiler title={`📋 ${child.agent} agent 对话记录`} defaultOpen={false}>
+      <div onClick={loadSub} style={{ cursor: loaded ? 'default' : 'pointer' }}>
+        {!loaded && <p style={{ color: 'var(--fg-muted)', fontSize: 12 }}>点击加载子 agent 对话...</p>}
+        {loaded && messages.length === 0 && <p style={{ color: 'var(--fg-muted)' }}>（无消息）</p>}
+        {loaded && messages.map((m, i) => (
+          <div key={i} style={{ margin: '4px 0', padding: '4px 8px', background: 'var(--bg)', borderRadius: 4, fontSize: 12 }}>
+            <span style={{ color: 'var(--fg-muted)' }}>{m.role}: </span>
+            <span style={{ whiteSpace: 'pre-wrap' }}>{m.content || ''}</span>
+          </div>
+        ))}
+      </div>
+    </Spoiler>
   );
 }

@@ -103,7 +103,7 @@ struct StreamOptions {
 }
 
 /// Token 用量。
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct ChatUsage {
     pub prompt_tokens: u64,
     pub completion_tokens: u64,

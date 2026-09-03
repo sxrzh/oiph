@@ -1,27 +1,35 @@
 //! 终端辅助：raw 模式输出适配、双 Esc 打断。
 
-use std::cell::{Cell, RefCell};
+use std::cell::Cell;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use tokio::sync::{Notify, mpsc::UnboundedSender};
 
 thread_local! {
     static RAW_MODE: Cell<bool> = const { Cell::new(false) };
-    static WS_SENDER: RefCell<Option<UnboundedSender<String>>> = const { RefCell::new(None) };
 }
+
+// WS sender 用全局 Mutex 而非 thread_local：
+// tokio 任务在 await 点可能迁移 worker 线程，thread_local 会导致
+// set 与 send 落在不同线程，WS 消息静默丢失。
+static WS_SENDER: Mutex<Option<UnboundedSender<String>>> = Mutex::new(None);
 
 /// 设置 WebSocket 发送器（Web GUI 模式下用），将日志/内容转发给前端。
 pub fn set_ws_sender(sender: Option<UnboundedSender<String>>) {
-    WS_SENDER.with(|s| *s.borrow_mut() = sender);
+    *WS_SENDER.lock().unwrap() = sender;
 }
 
 fn ws_send(msg: &str) {
-    WS_SENDER.with(|s| {
-        if let Some(sender) = s.borrow().as_ref() {
+    if let Ok(guard) = WS_SENDER.lock()
+        && let Some(sender) = guard.as_ref() {
             let _ = sender.send(msg.to_string());
         }
-    });
+}
+
+/// 当前是否处于 GUI（WS 转发）模式。
+fn ws_active() -> bool {
+    WS_SENDER.lock().map(|g| g.is_some()).unwrap_or(false)
 }
 
 pub fn set_raw(on: bool) {
@@ -73,9 +81,35 @@ pub fn print_content(text: &str) {
     ));
 }
 
-/// 打印思维链。过长时只显示最后 300 字符，前面用 ... 替代。
+/// Token 用量 JSON 值转发（GUI 状态栏实时更新）。
+pub fn send_usage(usage_json: &str) {
+    ws_send(&format!(r#"{{"type":"usage","usage":{usage_json}}}"#));
+}
+
+/// 工具调用结构化消息（GUI 完整显示，不截断）。
+pub fn send_tool_call(name: &str, args: &serde_json::Value) {
+    ws_send(&format!(
+        r#"{{"type":"tool_call","name":{},"args":{}}}"#,
+        serde_json::to_string(name).unwrap_or_default(),
+        serde_json::to_string(args).unwrap_or_default(),
+    ));
+}
+
+/// 工具结果结构化消息（GUI 完整显示，不截断）。
+pub fn send_tool_result(result: &str) {
+    ws_send(&format!(
+        r#"{{"type":"tool_result","text":{}}}"#,
+        serde_json::to_string(result).unwrap_or_default(),
+    ));
+}
+
+/// 步骤边界：通知前端新开一条消息（思维链/内容）。
+pub fn send_step_boundary() {
+    ws_send(r#"{"type":"step_boundary"}"#);
+}
+
+/// 打印思维链。CLI 模式过长时只显示最后 300 字符（GUI 模式显示完整）。
 /// 输出到 stderr（不干扰 stdout 内容流），加灰色前缀。
-use std::sync::Mutex;
 static REASONING_BUF: Mutex<String> = Mutex::new(String::new());
 
 pub fn reset_reasoning_buf() {
@@ -87,17 +121,23 @@ pub fn reset_reasoning_buf() {
 }
 
 pub fn print_reasoning(text: &str) {
-    let mut buf = REASONING_BUF.lock().unwrap();
-    buf.push_str(text);
-    let len = buf.chars().count();
-    let display: String = if len > 300 {
-        format!("...{}", buf.chars().skip(len - 300).collect::<String>())
+    let buf_display;
+    {
+        let mut buf = REASONING_BUF.lock().unwrap();
+        buf.push_str(text);
+        buf_display = buf.clone();
+    }
+    let len = buf_display.chars().count();
+    // GUI 模式（WS sender 已设置）终端也显示完整思维链，不截断
+    let gui_mode = ws_active();
+    let display: String = if !gui_mode && len > 300 {
+        format!("...{}", buf_display.chars().skip(len - 300).collect::<String>())
     } else {
-        buf.clone()
+        buf_display
     };
     // 回车到行首覆盖
     print_err("\r");
-    print_err(&format!("\x1b[2m[思维链] {}\x1b[0m\r", display.chars().take(200).collect::<String>()));
+    print_err(&format!("\x1b[2m[思维链] {}\x1b[0m\r", display));
     // WebSocket 转发原始 delta
     ws_send(&format!(
         r#"{{"type":"reasoning","text":{}}}"#,

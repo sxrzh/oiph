@@ -329,6 +329,7 @@ pub async fn run_turn(
         if stream_reasoning {
             term::reset_reasoning_buf();
         }
+        term::send_step_boundary();
 
         term::println_err(&format!(
             "--- [{}] step {step}: 调用模型 ---",
@@ -366,16 +367,24 @@ pub async fn run_turn(
             });
         }
 
-        // 每步结束后实时显示累计用量
+        // 每步结束后实时显示累计用量（CLI 终端 + GUI 状态栏）
         if let Some(acc) = &total_usage {
             term::println_err(&crate::client::format_usage(deps.model, acc));
+            if let Ok(u) = serde_json::to_value(acc) {
+                term::send_usage(&u.to_string());
+            }
         }
 
         if result.interrupted {
             // 用户打断：保留已产生的 assistant 消息（content + tool_calls），但不包含 reasoning
             let mut msg = result.message;
             msg.reasoning = None;
+            let tcs = msg.tool_calls.clone().unwrap_or_default();
+            // assistant 消息必须在前，占位 tool 结果跟在后面（顺序不能反）
             messages.push(msg);
+            for tc in &tcs {
+                messages.push(Message::tool("[工具被用户中止]".into(), tc.id.clone()));
+            }
             return Ok(TurnResult {
                 text: String::new(),
                 interrupted: true,
@@ -404,8 +413,13 @@ pub async fn run_turn(
 
         messages.push(assistant_msg);
 
-        for call in &tool_calls {
+        for (call_idx, call) in tool_calls.iter().enumerate() {
             if cancel.is_cancelled() {
+                // 为剩余未执行的 tool_calls 补占位结果，保证 assistant.tool_calls
+                // 与 tool 消息一一对应（否则下次调用 API 报 400）
+                for remaining in &tool_calls[call_idx..] {
+                    messages.push(Message::tool("[工具被用户中止]".into(), remaining.id.clone()));
+                }
                 return Ok(TurnResult {
                     text: String::new(),
                     interrupted: true,
@@ -440,9 +454,40 @@ pub async fn run_turn(
             }
 
             term::println_err(&format!("工具调用：{name}({})", args_summary(&args)));
-            let dispatch_result = Box::pin(dispatch(role, app, &ctx, deps, cancel, name, &args)).await;
+            term::send_tool_call(name, &args);
+            term::send_step_boundary();
+            let cancel_clone = cancel.clone();
+            let dispatch_fut = Box::pin(dispatch(role, app, &ctx, deps, cancel, name, &args));
+            let tool_name_for_wait = name.clone();
+            let dispatch_result = tokio::select! {
+                r = dispatch_fut => {
+                    r
+                }
+                _ = cancel_clone.wait() => {
+                    term::println_err(&format!("⚠ 工具 {name} 被中止"));
+                    format!("[工具 {name} 被用户中止]")
+                }
+                _ = async {
+                    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                    let msg = "（工具正在运行，请稍候）";
+                    term::println_err(msg);
+                    // 3 秒后继续等待完成（保持挂起即可，由 dispatch 分支结束 select）
+                    std::future::pending::<()>().await
+                } => {
+                    unreachable!()
+                }
+            };
+            let _ = tool_name_for_wait;
+            term::send_tool_result(&dispatch_result);
             term::println_err(&format!("-> {}", summary_line(&dispatch_result)));
             messages.push(Message::tool(dispatch_result, call.id.clone()));
+            if cancel.is_cancelled() {
+                return Ok(TurnResult {
+                    text: String::new(),
+                    interrupted: true,
+                    usage: total_usage,
+                });
+            }
         }
     }
 
@@ -971,6 +1016,14 @@ async fn call_sub_agent(
         Err(e) => (format!("子 Agent 出错：{e:#}"), false),
     };
 
+    // 存入待保存队列，由调用方在保存主 session 时一并写入子 session 文件
+    let summary: String = final_text.chars().take(100).collect();
+    crate::session::push_pending_sub_session(
+        prompts::role_name(role).to_string(),
+        messages.clone(),
+        summary,
+    );
+
     if let Some(comp) = &component {
         let status = if ok {
             ComponentStatus::completed_now()
@@ -982,39 +1035,11 @@ async fn call_sub_agent(
     }
 
     format!(
-        "=== {} agent 结果（{}）===\n{}\n\n--- 对话记录（摘要） ---\n{}",
+        "=== {} agent 结果（{}）===\n{}\n[sub-session]",
         prompts::role_name(role),
         if ok { "成功" } else { "失败" },
         final_text,
-        transcript(&messages)
     )
-}
-
-fn transcript(messages: &[Message]) -> String {
-    const MSG_CAP: usize = 400;
-    const TOTAL_CAP: usize = 8000;
-    let mut out = String::new();
-    for m in messages {
-        if m.role == "assistant"
-            && let Some(c) = &m.content {
-                if c.trim().is_empty() {
-                    continue;
-                }
-                let mut line: String = c.chars().take(MSG_CAP).collect();
-                if c.chars().count() > MSG_CAP {
-                    line.push_str("…[截断]");
-                }
-                out.push_str(&format!("[assistant] {line}\n\n"));
-                if out.chars().count() > TOTAL_CAP {
-                    break;
-                }
-            }
-    }
-    if out.is_empty() {
-        "（无）".into()
-    } else {
-        out
-    }
 }
 
 // ---------------------------------------------------------------------------

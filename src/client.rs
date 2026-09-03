@@ -183,6 +183,7 @@ struct RawUsage {
 // Client
 // ---------------------------------------------------------------------------
 
+#[derive(Clone)]
 pub struct Client {
     http: reqwest::Client,
     base_url: String,

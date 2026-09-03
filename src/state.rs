@@ -1,5 +1,6 @@
 //! 全局应用状态：客户端配置、当前比赛目录、知识库与 skills 目录。
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
@@ -9,6 +10,7 @@ use crate::agent::AgentDeps;
 use crate::client::Client;
 use crate::dupcheck::Backend;
 use crate::paths;
+use crate::prompts::AgentPrompts;
 use crate::tools::ToolContext;
 
 pub struct App {
@@ -21,6 +23,10 @@ pub struct App {
     pub max_steps: usize,
     pub dup_backend: Backend,
     pub client: Client,
+    /// 各 agent 的系统提示词（从 ~/.oiph/config 加载）。
+    prompts: Mutex<AgentPrompts>,
+    /// per-agent 客户端（agents.json 中配置了 base_url/api_key 的 agent）。
+    agent_clients: Mutex<HashMap<String, Client>>,
 }
 
 impl App {
@@ -44,7 +50,40 @@ impl App {
             max_steps,
             dup_backend,
             client,
+            prompts: Mutex::new(AgentPrompts::default()),
+            agent_clients: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// 设置 agent 提示词与 per-agent 客户端（启动时从配置加载）。
+    pub fn set_agent_setup(
+        &self,
+        prompts: AgentPrompts,
+        clients: HashMap<String, Client>,
+    ) {
+        if let Ok(mut p) = self.prompts.lock() {
+            *p = prompts;
+        }
+        if let Ok(mut c) = self.agent_clients.lock() {
+            *c = clients;
+        }
+    }
+
+    /// agent 的系统提示词。
+    pub fn prompt_for(&self, role_name: &str) -> String {
+        self.prompts
+            .lock()
+            .ok()
+            .and_then(|p| {
+                crate::prompts::role_from_name(role_name)
+                    .map(|r| p.get(r).to_string())
+            })
+            .unwrap_or_default()
+    }
+
+    /// 按 agent 名取客户端（未单独配置则回退全局客户端）。
+    pub fn client_for(&self, role_name: &str) -> Option<Client> {
+        self.agent_clients.lock().ok()?.get(role_name).cloned()
     }
 
     pub fn contest_dir(&self) -> Option<PathBuf> {
@@ -90,7 +129,6 @@ impl App {
 
     pub fn deps(&self) -> AgentDeps<'_> {
         AgentDeps {
-            client: &self.client,
             model: &self.model,
             max_steps: self.max_steps,
         }

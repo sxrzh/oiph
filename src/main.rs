@@ -12,6 +12,7 @@
 mod agent;
 mod assets;
 mod client;
+mod config;
 mod dupcheck;
 mod export_lemon;
 mod kb;
@@ -106,6 +107,11 @@ enum Commands {
         #[command(subcommand)]
         cmd: SkillCmd,
     },
+    /// 编辑 agent 系统提示词。
+    Prompt {
+        #[command(subcommand)]
+        cmd: PromptCmd,
+    },
     /// 管理会话（supervisor 对话历史）。
     Session {
         #[command(subcommand)]
@@ -176,6 +182,79 @@ enum SkillCmd {
         #[arg(short = 'g', long)]
         global: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum PromptCmd {
+    /// 从指定文件读取提示词，替换 agent 的当前提示词。
+    Update { agent: String, file: String },
+    /// 用编辑器编辑 agent 的提示词（类似 git commit 的编辑流程：改临时文件，
+    /// 退出后有修改才写回）。不指定 editor 时使用 vim。
+    Edit { agent: String, editor: Option<String> },
+}
+
+/// 解析 agent 名（必须是 agents.json 中存在的 agent）。
+fn resolve_agent(name: &str) -> Result<config::AgentConfig> {
+    let cfg = config::load_agents_config()?;
+    cfg.get(name)
+        .cloned()
+        .ok_or_else(|| anyhow!("未知 agent '{name}'（可用：{}）", config::AGENTS.join(", ")))
+}
+
+fn run_prompt_cmd(cmd: &PromptCmd) -> Result<()> {
+    match cmd {
+        PromptCmd::Update { agent, file } => {
+            let ac = resolve_agent(agent)?;
+            let prompt_path = config::expand_tilde(&ac.prompt);
+            let content = std::fs::read_to_string(file)
+                .with_context(|| format!("读取 '{file}' 失败"))?;
+            anyhow::ensure!(!content.trim().is_empty(), "'{file}' 内容为空");
+            if let Some(parent) = prompt_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            std::fs::write(&prompt_path, &content)
+                .with_context(|| format!("写入 {} 失败", prompt_path.display()))?;
+            println!("已更新 {agent} 的提示词：{}", prompt_path.display());
+            Ok(())
+        }
+        PromptCmd::Edit { agent, editor } => {
+            let ac = resolve_agent(agent)?;
+            let prompt_path = config::expand_tilde(&ac.prompt);
+            if let Some(parent) = prompt_path.parent() {
+                std::fs::create_dir_all(parent)?;
+            }
+            let current = std::fs::read_to_string(&prompt_path).unwrap_or_default();
+
+            // git commit 风格：写临时文件 → 编辑器打开 → 退出后有修改才写回
+            let tmp = std::env::temp_dir().join(format!(
+                "oiph-prompt-{}-{}.md",
+                agent,
+                uuid::Uuid::new_v4()
+            ));
+            std::fs::write(&tmp, &current)?;
+            let editor = editor.clone().unwrap_or_else(|| "vim".into());
+            let status = std::process::Command::new(&editor)
+                .arg(&tmp)
+                .status()
+                .with_context(|| format!("启动编辑器 '{editor}' 失败"))?;
+            if !status.success() {
+                let _ = std::fs::remove_file(&tmp);
+                bail!("编辑器异常退出，提示词未修改");
+            }
+            let new = std::fs::read_to_string(&tmp)?;
+            std::fs::remove_file(&tmp).ok();
+            if new == current {
+                println!("提示词未修改");
+            } else if new.trim().is_empty() {
+                let _ = std::fs::remove_file(&tmp);
+                bail!("提示词不能为空，已放弃修改");
+            } else {
+                std::fs::write(&prompt_path, &new)?;
+                println!("已更新 {agent} 的提示词：{}", prompt_path.display());
+            }
+            Ok(())
+        }
+    }
 }
 
 #[derive(Subcommand)]
@@ -262,6 +341,7 @@ async fn main() -> Result<()> {
         Some(Commands::Cli { prompt }) => return run_cli(&cli, prompt.as_deref()).await,
         Some(Commands::Kb { cmd }) => return run_kb_cmd(&cli, cmd).await,
         Some(Commands::Skill { cmd }) => return run_skill_cmd(&cli, cmd),
+        Some(Commands::Prompt { cmd }) => return run_prompt_cmd(cmd),
         Some(Commands::Session { cmd }) => return run_session_cmd(&cli, cmd),
         Some(Commands::Export { cmd }) => return run_export_cmd(&cli, cmd),
         Some(Commands::Test { problem }) => return run_test_cmd(&cli, problem.as_deref()),
@@ -283,6 +363,9 @@ async fn main() -> Result<()> {
 async fn run_gui(cli: &Cli) -> Result<()> {
     let root = std::env::current_dir()?;
     let dup_backend = dupcheck::Backend::parse(&cli.dup_backend).unwrap_or_default();
+    // 启动检查：agents.json + 提示词
+    let setup = config::require_agent_setup(&cli.base_url, cli.api_key.as_deref().unwrap_or(""))
+        .map_err(|e| anyhow!("{e:#}\n（请先运行 init.sh 初始化 ~/.oiph）"))?;
     let app = Arc::new(App::new(
         root,
         cli.base_url.clone(),
@@ -292,6 +375,7 @@ async fn run_gui(cli: &Cli) -> Result<()> {
         cli.max_steps,
         dup_backend,
     )?);
+    app.set_agent_setup(setup.prompts, setup.clients);
     let contest_dir = resolve_contest(&app.root, cli.contest.as_deref());
     app.set_contest_dir(contest_dir);
     server::serve(app, cli.port).await
@@ -583,6 +667,9 @@ fn require_api_key_for_embeddings(embed_model: Option<&str>, api_key: Option<&st
 async fn run_repl(cli: &Cli, root: &Path) -> Result<()> {
     let dup_backend = dupcheck::Backend::parse(&cli.dup_backend)
         .unwrap_or(dupcheck::Backend::Cpret);
+    // 启动检查：agents.json + 提示词
+    let setup = config::require_agent_setup(&cli.base_url, cli.api_key.as_deref().unwrap_or(""))
+        .map_err(|e| anyhow!("{e:#}\n（请先运行 init.sh 初始化 ~/.oiph）"))?;
     let app = Arc::new(App::new(
         root.to_path_buf(),
         cli.base_url.clone(),
@@ -592,6 +679,7 @@ async fn run_repl(cli: &Cli, root: &Path) -> Result<()> {
         cli.max_steps,
         dup_backend,
     )?);
+    app.set_agent_setup(setup.prompts, setup.clients);
 
     let contest_dir = resolve_contest(root, cli.contest.as_deref());
     app.set_contest_dir(contest_dir.clone());

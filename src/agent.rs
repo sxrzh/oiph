@@ -6,7 +6,7 @@ use anyhow::{Result, anyhow};
 use chrono::Utc;
 use serde_json::Value;
 
-use crate::client::{ChatUsage, Client, FunctionDef, Message, Tool};
+use crate::client::{ChatUsage, FunctionDef, Message, Tool};
 use crate::model::{
     ComponentStatus, DuplicateCheckResult, JudgingStatus, ProblemSource, ProblemType,
     SolutionStatus, Verdict,
@@ -27,7 +27,6 @@ pub enum Role {
 }
 
 pub struct AgentDeps<'a> {
-    pub client: &'a Client,
     pub model: &'a str,
     pub max_steps: usize,
 }
@@ -278,7 +277,7 @@ pub fn definitions_for(role: Role) -> Vec<Tool> {
 /// 子 Agent 额外附 RESULT 完成标志说明。
 pub fn system_message_for(role: Role, app: &App) -> Message {
     let skills = crate::skills::discover(&app.skill_roots());
-    let mut text = prompts::system_prompt(role).to_string();
+    let mut text = app.prompt_for(prompts::role_name(role));
     text.push_str(&crate::skills::prompt_section(&skills));
     if role != Role::Supervisor {
         text.push_str(prompts::RESULT_HINT);
@@ -341,8 +340,11 @@ pub async fn run_turn(
         };
         let ctx = app.tool_ctx(&workdir);
 
-        let result = deps
-            .client
+        // per-agent 客户端（agents.json 配置了 base_url/api_key 的 agent），否则全局
+        let role_name = prompts::role_name(role);
+        let client = app.client_for(role_name).unwrap_or_else(|| app.client.clone());
+
+        let result = client
             .chat_stream(deps.model, messages, &tool_defs, cancel, on_content, on_reasoning)
             .await?;
 
@@ -1099,9 +1101,8 @@ mod tests {
         .unwrap()
     }
 
-    fn deps(client: &Client) -> AgentDeps<'_> {
+    fn deps() -> AgentDeps<'static> {
         AgentDeps {
-            client,
             model: "m",
             max_steps: 10,
         }
@@ -1145,8 +1146,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("preparer_test_agent_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let app = test_app(root.clone());
-        let client = Client::new("http://localhost:1/v1".into(), "k".into()).unwrap();
-        let d = deps(&client);
+        let d = deps();
         let cancel = term::CancelFlag::new();
         let ctx = app.tool_ctx(&root);
 
@@ -1180,8 +1180,7 @@ mod tests {
         let root = std::env::temp_dir().join(format!("preparer_test_noct_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let app = test_app(root.clone());
-        let client = Client::new("http://localhost:1/v1".into(), "k".into()).unwrap();
-        let d = deps(&client);
+        let d = deps();
         let cancel = term::CancelFlag::new();
         let ctx = app.tool_ctx(&root);
         let out = dispatch(Role::Supervisor, &app, &ctx, &d, &cancel, "check_data", &serde_json::json!({})).await;

@@ -45,9 +45,18 @@ cargo build
 ./target/debug/preparer kb add <文件> # 知识库管理
 ./target/debug/preparer session list # 会话管理
 
+# 首次使用：初始化 ~/.oiph（安装内置 skills/kb/prompts + 生成 agents.json）
+./init.sh                # 来源默认为仓库 assets/，可指定：./init.sh /path/to/assets
+
+# agent 配置（~/.oiph/config/agents.json：每个 agent 的 base_url / api_key / prompt）
+# 提示词编辑（存于 ~/.oiph/config/prompts/<agent>.md）
+./target/debug/preparer prompt update statement new_prompt.md  # 从文件替换
+./target/debug/preparer prompt edit statement                  # vim 编辑（git commit 风格）
+./target/debug/preparer prompt edit solution code              # 指定编辑器
+
 # 知识库管理（两级）
 - 全局知识库：`~/.oiph/kb/`；工程知识库：`<比赛工程>/.oiph/kb/`（检索时两者合并）
-- 仓库内 `assets/kb/` 的文档（题面规范、题目来源、NOI 大纲）在启动时自动种子到全局知识库
+- `init.sh` 把 `assets/kb/` 构建到全局知识库（来源标签为 `<builtin>/...`）
 - `kb add` 默认加到工程知识库（无比赛工程则全局），`-g/--global` 强制全局
 
 ./target/debug/preparer kb add assets/kb/statement_req.md

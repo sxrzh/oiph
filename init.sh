@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# init.sh：安装 skills 和知识库到 ~/.oiph
+# init.sh：安装 OIPH 默认的提示词、skills 和知识库到 ~/.oiph
 #
 # 用法：
 #   ./init.sh [ASSETS_DIR] [--force]
@@ -20,6 +20,8 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OIPH_HOME="${HOME}/.oiph"
 KB_DIR="${OIPH_HOME}/kb"
 SKILLS_DIR="${OIPH_HOME}/skills"
+CONFIG_DIR="${OIPH_HOME}/config"
+PROMPTS_DIR="${CONFIG_DIR}/prompts"
 
 # 解析参数：第一个非 --force 参数为 assets 目录，默认脚本所在目录
 ASSETS_DIR=""
@@ -41,7 +43,7 @@ for arg in "$@"; do
             ;;
     esac
 done
-[ -z "$ASSETS_DIR" ] && ASSETS_DIR="$SCRIPT_DIR"
+[ -z "$ASSETS_DIR" ] && ASSETS_DIR="$SCRIPT_DIR/assets"
 ASSETS_DIR="$(cd "$ASSETS_DIR" && pwd)"
 
 KB_ASSETS="$ASSETS_DIR/kb"
@@ -94,6 +96,41 @@ if [ -d "$KB_ASSETS" ]; then
     done < <(find "$KB_ASSETS" -type f -print0)
 else
     echo "警告：$KB_ASSETS 不存在" >&2
+fi
+
+# 4. 安装默认提示词（已存在跳过，--force 覆盖）
+PROMPTS_ASSETS="$ASSETS_DIR/prompts"
+if [ -d "$PROMPTS_ASSETS" ]; then
+    mkdir -p "$PROMPTS_DIR"
+    for f in "$PROMPTS_ASSETS"/*.md; do
+        [ -f "$f" ] || continue
+        name="$(basename "$f")"
+        if [ -f "$PROMPTS_DIR/$name" ] && [ "$FORCE" -eq 0 ]; then
+            echo "  prompt $name 已存在，跳过（--force 覆盖）"
+            continue
+        fi
+        cp "$f" "$PROMPTS_DIR/"
+        echo "✓ 安装 prompt $name"
+    done
+else
+    echo "警告：$PROMPTS_ASSETS 不存在" >&2
+fi
+
+# 5. 生成 agents.json（已存在则不动）
+if [ ! -f "$CONFIG_DIR/agents.json" ]; then
+    mkdir -p "$CONFIG_DIR"
+    cat > "$CONFIG_DIR/agents.json" <<EOF
+{
+  "supervisor": { "base_url": null, "api_key": null, "prompt": "$PROMPTS_DIR/supervisor.md" },
+  "statement":  { "base_url": null, "api_key": null, "prompt": "$PROMPTS_DIR/statement.md" },
+  "solution":   { "base_url": null, "api_key": null, "prompt": "$PROMPTS_DIR/solution.md" },
+  "auxiliary":  { "base_url": null, "api_key": null, "prompt": "$PROMPTS_DIR/auxiliary.md" },
+  "searching":  { "base_url": null, "api_key": null, "prompt": "$PROMPTS_DIR/searching.md" }
+}
+EOF
+    echo "✓ 生成 $CONFIG_DIR/agents.json"
+else
+    echo "  agents.json 已存在，跳过"
 fi
 
 echo "初始化完成。全局配置目录：$OIPH_HOME"

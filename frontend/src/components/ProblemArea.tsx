@@ -17,6 +17,23 @@ export function ProblemArea({
 }) {
   const [activeTab, setActiveTab] = useState<(typeof DETAIL_TABS)[number]>('基本信息');
   const [editingFile, setEditingFile] = useState<string | null>(null);
+  const [testing, setTesting] = useState(false);
+
+  const runSelfTest = async () => {
+    if (!problem || testing) return;
+    setTesting(true);
+    try {
+      const d = await fetch('/api/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ problem: problem.id }),
+      }).then(r => r.json());
+      swAlert('自测结果', d.reports?.map((r: any) => r.log.join('\n')).join('\n\n') || JSON.stringify(d));
+      onRefresh();
+    } finally {
+      setTesting(false);
+    }
+  };
 
   if (!problem) {
     return <div className="detail-content"><p style={{ color: 'var(--fg-muted)' }}>比赛工程未建立，请先创建比赛。</p></div>;
@@ -28,7 +45,7 @@ export function ProblemArea({
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
           <h3 style={{ flex: 1 }}>{problem.name || problem.id}</h3>
           <button className="btn" onClick={() => { onRefresh(); }}>刷新</button>
-          <button className="btn" onClick={() => fetch('/api/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ problem: problem.id }) }).then(r => r.json()).then(d => swAlert('集成测试结果', d.reports?.map((r: any) => r.log.join('\n')).join('\n\n') || JSON.stringify(d)))}>单题自测</button>
+          <button className="btn" disabled={testing} onClick={runSelfTest}>{testing ? '测试中…' : '单题自测'}</button>
         </div>
       </div>
       <div className="detail-tabs">

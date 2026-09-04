@@ -1,6 +1,6 @@
 //! Web GUI 服务器：Axum HTTP + WebSocket，嵌入式前端。
 
-use std::path::Path;
+
 use std::sync::Arc;
 
 use axum::{
@@ -54,6 +54,16 @@ fn total_usage(st: &ServerState) -> session_mod::TokenUsage {
         (a, b) => a.or(b),
     };
     t
+}
+
+/// 用量转前端字段（input/output/cache_hit_tokens）。
+fn usage_to_value(u: &session_mod::TokenUsage) -> Value {
+    json!({
+        "input": u.prompt_tokens,
+        "output": u.completion_tokens,
+        "total_tokens": u.total_tokens,
+        "cache_hit_tokens": u.cache_hit_tokens,
+    })
 }
 
 pub async fn serve(app: Arc<App>, port: u16) -> anyhow::Result<()> {
@@ -374,12 +384,7 @@ async fn switch_session(
             *st.messages.lock().await = msgs;
             *st.current_session.lock().await = Some(req.name.clone());
             // 切换 session：用量基线切换为新 session 的持久化用量，清空 pending
-            let usage_json = json!({
-                "prompt_tokens": s.usage.prompt_tokens,
-                "completion_tokens": s.usage.completion_tokens,
-                "total_tokens": s.usage.total_tokens,
-                "cache_hit_tokens": s.usage.cache_hit_tokens,
-            });
+            let usage_json = usage_to_value(&s.usage);
             *st.saved_usage.lock().unwrap() = s.usage.clone();
             *st.pending_usage.lock().unwrap() = Default::default();
             Json(json!({ "ok": true, "name": req.name, "messages": messages_json, "children": children_json, "usage": usage_json }))
@@ -401,10 +406,17 @@ async fn export_lemon(
     let Some(d) = &cdir else {
         return Json(json!({ "error": "无比赛工程" }));
     };
-    let out = req.output.as_deref().map(Path::new);
-    match crate::export_lemon::export(d, out) {
-        Ok(path) => Json(json!({ "ok": true, "path": path.display().to_string() })),
-        Err(e) => Json(json!({ "error": format!("{e:#}") })),
+    // 导出是阻塞文件操作，放到阻塞线程池避免占满 async worker
+    let d = d.clone();
+    let out_owned: Option<std::path::PathBuf> = req.output.map(std::path::PathBuf::from);
+    match tokio::task::spawn_blocking(move || {
+        crate::export_lemon::export(&d, out_owned.as_deref())
+    })
+    .await
+    {
+        Ok(Ok(path)) => Json(json!({ "ok": true, "path": path.display().to_string() })),
+        Ok(Err(e)) => Json(json!({ "error": format!("{e:#}") })),
+        Err(e) => Json(json!({ "error": format!("导出任务失败：{e}") })),
     }
 }
 
@@ -421,7 +433,21 @@ async fn run_test(
     let Some(d) = &cdir else {
         return Json(json!({ "error": "无比赛工程" }));
     };
-    let reports = crate::test_runner::run_tests(d, req.problem.as_deref());
+    // 测试是长时间阻塞操作（编译 + 跑数据），放到阻塞线程池，
+    // 避免占满 async worker 导致整个服务器无响应
+    let d = d.clone();
+    let pid = req.problem.clone();
+    let reports = tokio::task::spawn_blocking(move || {
+        crate::test_runner::run_tests(&d, pid.as_deref())
+    })
+    .await
+    .unwrap_or_else(|e| {
+        vec![{
+            let mut r = crate::test_runner::TestReport::new("?");
+            r.err(format!("测试任务失败：{e}"));
+            r
+        }]
+    });
     let results: Vec<Value> = reports
         .iter()
         .map(|r| {
@@ -459,12 +485,7 @@ async fn handle_ws(mut socket: WebSocket, st: Arc<ServerState>) {
         let _ = tx_out.send(
             json!({
                 "type": "usage",
-                "usage": {
-                    "prompt_tokens": total.prompt_tokens,
-                    "completion_tokens": total.completion_tokens,
-                    "total_tokens": total.total_tokens,
-                    "cache_hit_tokens": total.cache_hit_tokens,
-                },
+                "usage": usage_to_value(&total),
             })
             .to_string(),
         );
@@ -561,17 +582,10 @@ async fn handle_ws(mut socket: WebSocket, st: Arc<ServerState>) {
                             (a, b) => a.or(b),
                         };
                     }
-                    let total = total_usage(&st_agent);
                     let _ = tx_agent.send(
                         json!({
                             "type": "done",
                             "interrupted": turn_result.interrupted,
-                            "usage": {
-                                "prompt_tokens": total.prompt_tokens,
-                                "completion_tokens": total.completion_tokens,
-                                "total_tokens": total.total_tokens,
-                                "cache_hit_tokens": total.cache_hit_tokens,
-                            },
                         })
                         .to_string(),
                     );
@@ -583,17 +597,12 @@ async fn handle_ws(mut socket: WebSocket, st: Arc<ServerState>) {
                 }
             }
             save_session(&st_agent).await;
-            // 保存后发送一次总用量（状态栏刷新为持久化后的值）
+            // 保存后发送一次总用量（状态栏刷新为持久化后的基线）
             let total = total_usage(&st_agent);
             let _ = tx_agent.send(
                 json!({
                     "type": "usage",
-                    "usage": {
-                        "prompt_tokens": total.prompt_tokens,
-                        "completion_tokens": total.completion_tokens,
-                        "total_tokens": total.total_tokens,
-                        "cache_hit_tokens": total.cache_hit_tokens,
-                    },
+                    "usage": usage_to_value(&total),
                 })
                 .to_string(),
             );

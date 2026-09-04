@@ -324,20 +324,19 @@ impl Client {
         let mut usage: Option<ChatUsage> = None;
 
         // 流式期间的实时用量估算（API 只在流末尾给精确值）。
-        // 输入/输出（含思维链）都估算：CJK 字符约 0.6 token，其他约 0.25 token/字符。
-        let est_prompt = messages.iter().map(estimate_message_tokens).sum::<f64>();
+        // 推送的是本次流自己的增量估算（输入估算 + 输出含思维链的估算），
+        // 由显示层在累计用量的基础上累加；流结束发零清零，随后精确用量到达即修正。
+        // 估算：CJK 字符约 0.6 token，其他约 0.25 token/字符。
+        let est_input = messages.iter().map(estimate_message_tokens).sum::<f64>().round() as u64;
         let mut streamed_cjk = 0usize;
         let mut streamed_other = 0usize;
         let mut last_usage_push = std::time::Instant::now();
-        let send_live_usage = |est_prompt: f64, cjk: usize, other: usize| {
-            let completion = (cjk as f64 * 0.6 + other as f64 * 0.25).round() as u64;
-            let prompt = est_prompt.round() as u64;
-            crate::term::send_usage_json(&serde_json::json!({
-                "prompt_tokens": prompt,
-                "completion_tokens": completion,
-                "total_tokens": prompt + completion,
-            }).to_string());
+        let send_live = |cjk: usize, other: usize| {
+            let output = (cjk as f64 * 0.6 + other as f64 * 0.25).round() as u64;
+            crate::term::send_usage_live(est_input, output);
         };
+        // 流结束：清零增量（精确用量随后由上层以 base 修正）
+        let clear_live = || crate::term::send_usage_live(0, 0);
 
         loop {
             tokio::select! {
@@ -352,6 +351,7 @@ impl Client {
                                 for line in event.lines() {
                                     if let Some(data) = line.strip_prefix("data: ") {
                                         if data == "[DONE]" {
+                                            clear_live();
                                             // 流结束
                                             return Ok(self.build_result(content, reasoning, tool_calls, usage, false));
                                         }
@@ -401,14 +401,14 @@ impl Client {
                                                         cache_hit_tokens: u.prompt_cache_hit_tokens,
                                                         cache_miss_tokens: u.prompt_cache_miss_tokens,
                                                     });
-                                                    crate::term::send_usage_json(&serde_json::to_string(usage.as_ref().unwrap()).unwrap_or_default());
+                                                    clear_live();
                                                 }
-                                                // 流式期间每 800ms 推送一次实时估算（思维链接收中也要更新）
+                                                // 流式期间每 800ms 推送一次增量估算（思维链接收中也要更新）
                                                 if usage.is_none()
                                                     && last_usage_push.elapsed() >= std::time::Duration::from_millis(800)
                                                 {
                                                     last_usage_push = std::time::Instant::now();
-                                                    send_live_usage(est_prompt, streamed_cjk, streamed_other);
+                                                    send_live(streamed_cjk, streamed_other);
                                                 }
                                             }
                                             Err(e) => {
@@ -420,15 +420,18 @@ impl Client {
                             }
                         }
                         Some(Err(e)) => {
+                            clear_live();
                             return Err(anyhow::anyhow!("读取流失败：{e}"));
                         }
                         None => {
                             // 连接正常关闭
+                            clear_live();
                             return Ok(self.build_result(content, reasoning, tool_calls, usage, false));
                         }
                     }
                 }
                 _ = cancel.wait() => {
+                    clear_live();
                     return Ok(self.build_result(content, reasoning, tool_calls, usage, true));
                 }
             }
@@ -493,49 +496,18 @@ impl Client {
 // 用量展示与定价估算
 // ---------------------------------------------------------------------------
 
-/// 按模型名估算价格（USD）。返回 (input_per_M, output_per_M, cache_hit_per_M)。
-/// 不在表中的模型返回 None。
-pub fn model_pricing(model: &str) -> Option<(f64, f64, f64)> {
-    let m = model.to_lowercase();
-    if m.contains("deepseek-v4-flash") {
-        Some((0.14, 0.28, 0.014))
-    } else if m.contains("deepseek-chat") || m.contains("deepseek-v3") {
-        Some((0.27, 1.10, 0.07))
-    } else if m.contains("deepseek-r1") {
-        Some((0.55, 2.19, 0.14))
-    } else if m.contains("gpt-4o") {
-        Some((2.50, 10.0, 1.25))
-    } else if m.contains("gpt-4o-mini") {
-        Some((0.15, 0.60, 0.075))
-    } else {
-        None
+/// 格式化用量摘要：`输入 <input>(缓存命中 <hit/input*100>%) / 输出 <output>`。
+/// 无缓存命中时省略括号部分。
+pub fn format_usage(usage: &ChatUsage) -> String {
+    let input = usage.prompt_tokens;
+    let mut out = format!("输入 {input}");
+    if let Some(hit) = usage.cache_hit_tokens
+        && hit > 0
+    {
+        let pct = hit as f64 / input.max(1) as f64 * 100.0;
+        out.push_str(&format!("(缓存命中 {:.1}%)", pct));
     }
-}
-
-/// 估算费用（USD）。
-pub fn estimate_price(model: &str, usage: &ChatUsage) -> Option<f64> {
-    let (in_p, out_p, cache_p) = model_pricing(model)?;
-    let cache_hit = usage.cache_hit_tokens.unwrap_or(0);
-    let prompt_no_cache = usage.prompt_tokens.saturating_sub(cache_hit);
-    let price = (prompt_no_cache as f64 * in_p + cache_hit as f64 * cache_p + usage.completion_tokens as f64 * out_p) / 1_000_000.0;
-    Some(price)
-}
-
-/// 格式化用量摘要。
-pub fn format_usage(model: &str, usage: &ChatUsage) -> String {
-    let mut parts = vec![
-        format!("输入 {}", usage.prompt_tokens),
-        format!("输出 {}", usage.completion_tokens),
-    ];
-    if let Some(hit) = usage.cache_hit_tokens {
-        let total = usage.prompt_tokens.max(1) as f64;
-        let rate = hit as f64 / total * 100.0;
-        parts.push(format!("缓存命中 {}（{:.1}%）", hit, rate));
-    }
-    let mut out = format!("📊 Token 用量：{}", parts.join(" / "));
-    if let Some(price) = estimate_price(model, usage) {
-        out.push_str(&format!(" / 估计费用 ${:.4}", price));
-    }
+    out.push_str(&format!(" / 输出 {}", usage.completion_tokens));
     out
 }
 
@@ -574,21 +546,6 @@ mod tests {
         assert_eq!(u.completion_tokens, 50);
         assert_eq!(u.prompt_cache_hit_tokens, Some(80));
     }
-
-    #[test]
-    fn estimate_price_works() {
-        let usage = ChatUsage {
-            prompt_tokens: 1000,
-            completion_tokens: 500,
-            total_tokens: 1500,
-            cache_hit_tokens: Some(800),
-            cache_miss_tokens: None,
-        };
-        let price = estimate_price("deepseek-v4-flash", &usage).unwrap();
-        // (200 * 0.14 + 800 * 0.014 + 500 * 0.28) / 1M = (28 + 11.2 + 140) / 1M = 0.0001792
-        assert!((price - 0.0001792).abs() < 1e-6, "got {price}");
-    }
-
     #[test]
     fn format_usage_includes_cache() {
         let usage = ChatUsage {
@@ -598,9 +555,22 @@ mod tests {
             cache_hit_tokens: Some(800),
             cache_miss_tokens: None,
         };
-        let s = format_usage("deepseek-v4-flash", &usage);
-        assert!(s.contains("缓存命中"));
-        assert!(s.contains("80.0%"));
-        assert!(s.contains("$"));
+        let s = format_usage(&usage);
+        assert!(s.contains("输入 1000(缓存命中 80.0%)"), "got: {s}");
+        assert!(s.contains("/ 输出 500"), "got: {s}");
+        assert!(!s.contains('$'));
+    }
+
+    #[test]
+    fn format_usage_without_cache() {
+        let usage = ChatUsage {
+            prompt_tokens: 1000,
+            completion_tokens: 500,
+            total_tokens: 1500,
+            cache_hit_tokens: None,
+            cache_miss_tokens: None,
+        };
+        let s = format_usage(&usage);
+        assert_eq!(s, "输入 1000 / 输出 500");
     }
 }

@@ -19,7 +19,7 @@ pub struct TestReport {
 }
 
 impl TestReport {
-    fn new(pid: &str) -> Self {
+    pub(crate) fn new(pid: &str) -> Self {
         Self {
             problem_id: pid.into(),
             warnings: Vec::new(),
@@ -39,7 +39,7 @@ impl TestReport {
         self.log.push(format!("⚠ {msg}"));
     }
 
-    fn err(&mut self, msg: impl Into<String>) {
+    pub(crate) fn err(&mut self, msg: impl Into<String>) {
         let msg = msg.into();
         self.errors.push(msg.clone());
         self.log.push(format!("✗ {msg}"));
@@ -174,6 +174,14 @@ fn cleanup(tmp: &Path) {
     let _ = std::fs::remove_dir_all(tmp);
 }
 
+/// 带超时的命令（用 `timeout <secs>` 包裹），防止生成器/验证器/检查器等
+/// 意外挂起（如等待 stdin）导致测试请求永远不返回。
+fn timed_cmd(program: &Path, secs: u64) -> Command {
+    let mut c = Command::new("timeout");
+    c.arg(secs.to_string()).arg(program);
+    c
+}
+
 /// 编译 auxiliary 下的程序。
 fn compile_aux(problem: &Problem, aux_dir: &Path, tmp: &Path, report: &mut TestReport) {
     let flags = problem.compile_flags.split_whitespace().collect::<Vec<_>>();
@@ -192,7 +200,7 @@ fn compile_aux(problem: &Problem, aux_dir: &Path, tmp: &Path, report: &mut TestR
             continue;
         }
         let out = tmp.join(name);
-        let status = Command::new("g++")
+        let status = timed_cmd(Path::new("g++"), 600)
             .args(&flags)
             .arg("-I").arg(aux_dir)
             .arg("-o").arg(&out)
@@ -251,8 +259,8 @@ fn setup_data(
     for case_name in &cases {
         let in_dst = tmp.join(format!("{case_name}.in"));
         if let Some(gen_args) = problem.data_gen.get(case_name) {
-            // 用 generator 生成
-            let output = Command::new(&gen_bin)
+            // 用 generator 生成（限时 60s，防止挂起）
+            let output = timed_cmd(&gen_bin, 60)
                 .args(gen_args.split_whitespace())
                 .stdout(std::fs::File::create(&in_dst).map(Stdio::from).unwrap_or(Stdio::null()))
                 .stderr(Stdio::piped())
@@ -285,7 +293,10 @@ fn validate_inputs(tmp: &Path, cases: &[String], report: &mut TestReport) {
     }
     for case_name in cases {
         let in_file = tmp.join(format!("{case_name}.in"));
-        let status = Command::new(&validator).arg(&in_file).stderr(Stdio::piped()).output();
+        let status = timed_cmd(&validator, 30)
+            .arg(&in_file)
+            .stderr(Stdio::piped())
+            .output();
         match status {
             Ok(o) if o.status.success() => {}
             Ok(o) => report.err(format!(
@@ -335,7 +346,7 @@ fn compile_std(problem: &Problem, pdir: &Path, tmp: &Path, report: &mut TestRepo
         // 复制 std.cpp 到 tmp
         let std_dst = tmp.join("std.cpp");
         let _ = std::fs::copy(&std_path, &std_dst);
-        let status = Command::new("g++")
+        let status = timed_cmd(Path::new("g++"), 600)
             .args(&flags)
             .arg("-I").arg(tmp)
             .arg("-o").arg(&out)
@@ -349,7 +360,7 @@ fn compile_std(problem: &Problem, pdir: &Path, tmp: &Path, report: &mut TestRepo
             Err(e) => report.err(format!("std 编译失败：{e}")),
         }
     } else {
-        let status = Command::new("g++")
+        let status = timed_cmd(Path::new("g++"), 600)
             .args(&flags)
             .arg("-o").arg(&out)
             .arg(&std_path)
@@ -412,7 +423,7 @@ fn check_std(tmp: &Path, cases: &[String], report: &mut TestReport) {
         let in_file = tmp.join(format!("{case_name}.in"));
         let ans_file = tmp.join(format!("{case_name}.ans"));
         if checker.exists() {
-            let status = Command::new(&checker)
+            let status = timed_cmd(&checker, 30)
                 .arg(&in_file)
                 .arg(&ans_file)
                 .arg(&ans_file)
@@ -458,7 +469,7 @@ fn run_sols(
 
         // 编译
         let sol_bin = tmp.join(format!("sol_{sol_name}"));
-        let compile_status = Command::new("g++")
+        let compile_status = timed_cmd(Path::new("g++"), 600)
             .args(&flags)
             .arg("-I").arg(pdir.join("auxiliary"))
             .arg("-o").arg(&sol_bin)
@@ -499,7 +510,7 @@ fn run_sols(
                 Ok(_) => {
                     // 用 checker 或 diff 检查
                     if checker.exists() {
-                        let cs = Command::new(&checker)
+                        let cs = timed_cmd(&checker, 30)
                             .arg(&in_file)
                             .arg(&out_file)
                             .arg(&ans_file)

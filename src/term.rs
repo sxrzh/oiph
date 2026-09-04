@@ -28,7 +28,7 @@ fn ws_send(msg: &str) {
 }
 
 /// 当前是否处于 GUI（WS 转发）模式。
-fn ws_active() -> bool {
+pub fn ws_active() -> bool {
     WS_SENDER.lock().map(|g| g.is_some()).unwrap_or(false)
 }
 
@@ -82,13 +82,16 @@ pub fn print_content(text: &str) {
 }
 
 /// Token 用量 JSON 值转发（GUI 状态栏实时更新）。
-pub fn send_usage(usage_json: &str) {
-    ws_send(&format!(r#"{{"type":"usage","usage":{usage_json}}}"#));
+/// 本回合精确用量的增量更新（GUI 在全局基线上累加）。
+pub fn send_usage_turn(usage_json: &str) {
+    ws_send(&format!(r#"{{"type":"usage_turn","usage":{usage_json}}}"#));
 }
 
-/// 内部使用：直接推送用量 JSON（client 流式估算用，不经 println）。
-pub fn send_usage_json(usage_json: &str) {
-    ws_send(&format!(r#"{{"type":"usage","usage":{usage_json}}}"#));
+/// 流式估算的增量（本次流自己的输入/输出估算，显示层累加到累计值上）。
+pub fn send_usage_live(input: u64, output: u64) {
+    ws_send(&format!(
+        r#"{{"type":"usage_live","input":{input},"output":{output}}}"#
+    ));
 }
 
 /// 工具调用结构化消息（GUI 完整显示，不截断）。
@@ -131,11 +134,34 @@ pub fn reset_reasoning_buf() {
     if let Ok(mut buf) = REASONING_BUF.lock() {
         buf.clear();
     }
-    // 清除行
-    print_err("\r\x1b[K");
+    // CLI 单行覆盖模式需要清行；GUI 模式直接拼接不需要
+    if !ws_active() {
+        print_err("\r\x1b[K");
+    }
 }
 
 pub fn print_reasoning(text: &str) {
+    // GUI 模式：思维链流式直接拼接输出（不逐块重打整行、不换行）
+    if ws_active() {
+        let first = {
+            let mut buf = REASONING_BUF.lock().unwrap();
+            let empty = buf.is_empty();
+            buf.push_str(text);
+            empty
+        };
+        if first {
+            print_err("\n\x1b[2m[思维链]\x1b[0m ");
+        }
+        print_err(text);
+        // WebSocket 转发原始 delta
+        ws_send(&format!(
+            r#"{{"type":"reasoning","text":{}}}"#,
+            serde_json::to_string(text).unwrap_or_default()
+        ));
+        return;
+    }
+
+    // CLI 模式：单行覆盖显示，过长截断
     let buf_display;
     {
         let mut buf = REASONING_BUF.lock().unwrap();
@@ -143,9 +169,7 @@ pub fn print_reasoning(text: &str) {
         buf_display = buf.clone();
     }
     let len = buf_display.chars().count();
-    // GUI 模式（WS sender 已设置）终端也显示完整思维链，不截断
-    let gui_mode = ws_active();
-    let display: String = if !gui_mode && len > 300 {
+    let display: String = if len > 300 {
         format!("...{}", buf_display.chars().skip(len - 300).collect::<String>())
     } else {
         buf_display
@@ -153,7 +177,7 @@ pub fn print_reasoning(text: &str) {
     // 回车到行首覆盖
     print_err("\r");
     print_err(&format!("\x1b[2m[思维链] {}\x1b[0m\r", display));
-    // WebSocket 转发原始 delta
+    // WebSocket 转发原始 delta（CLI 模式无 WS，noop）
     ws_send(&format!(
         r#"{{"type":"reasoning","text":{}}}"#,
         serde_json::to_string(text).unwrap_or_default()

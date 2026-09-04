@@ -426,11 +426,16 @@ pub async fn run_turn(
             });
         }
 
-        // 每步结束后实时显示累计用量（CLI 终端 + GUI 状态栏）
+        // 每步结束后实时显示累计用量（CLI 终端打印；GUI 走 usage_turn 增量消息）
         if let Some(acc) = &total_usage {
-            term::println_err(&crate::client::format_usage(deps.model, acc));
-            if let Ok(u) = serde_json::to_value(acc) {
-                term::send_usage(&u.to_string());
+            term::println_err(&crate::client::format_usage(acc));
+            if role == Role::Supervisor {
+                let u = serde_json::json!({
+                    "input": acc.prompt_tokens,
+                    "output": acc.completion_tokens,
+                    "cache_hit_tokens": acc.cache_hit_tokens,
+                });
+                term::send_usage_turn(&u.to_string());
             }
         }
 
@@ -514,7 +519,14 @@ pub async fn run_turn(
                 }
             }
 
-            term::println_err(&format!("工具调用：{name}({})", args_summary(&args)));
+            // GUI 模式终端完整显示工具调用与结果（不截断）；CLI 保持摘要
+            let full = term::ws_active();
+            let args_disp = if full {
+                args.to_string()
+            } else {
+                args_summary(&args)
+            };
+            term::println_err(&format!("工具调用：{name}({args_disp})"));
             term::send_tool_call(name, &args);
             term::send_step_boundary(prompts::role_name(role));
             // 工具执行前捕获工作区快照（供 /undo 回滚；仅 supervisor，
@@ -545,7 +557,12 @@ pub async fn run_turn(
             };
             let _ = tool_name_for_wait;
             term::send_tool_result(&dispatch_result);
-            term::println_err(&format!("-> {}", summary_line(&dispatch_result)));
+            let res_disp = if full {
+                dispatch_result.clone()
+            } else {
+                summary_line(&dispatch_result)
+            };
+            term::println_err(&format!("-> {res_disp}"));
             messages.push(Message::tool(dispatch_result, call.id.clone()));
             push_progress(messages);
             if cancel.is_cancelled() {

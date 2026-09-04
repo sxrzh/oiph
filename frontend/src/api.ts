@@ -46,8 +46,16 @@ export interface SwitchSessionResp {
   name?: string;
   messages?: { role: string; content: string | null; tool_calls?: any[] }[];
   children?: { filename: string; agent: string; summary: string }[];
-  usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number; cache_hit_tokens?: number | null };
+  usage?: { input: number; output: number; total_tokens?: number; cache_hit_tokens?: number | null };
 }
+
+export interface UsageParts {
+  input: number;
+  output: number;
+  hit: number;
+}
+
+export const zeroUsage = (): UsageParts => ({ input: 0, output: 0, hit: 0 });
 
 export async function exportLemon(): Promise<{ ok?: boolean; path?: string; error?: string }> {
   return fetch('/api/export/lemon', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }).then(r => r.json());
@@ -66,8 +74,13 @@ export type WsMessage =
   | { type: 'step_boundary'; agent?: string }
   | { type: 'snapshot_done' }
   | { type: 'ask_user'; questions: any[] }
-  | { type: 'usage'; usage: any }
-  | { type: 'done'; interrupted: boolean; usage?: any }
+  /** 全局累计用量基线（回合结束/连接建立/切换会话时推送），收到后清空其他两块 */
+  | { type: 'usage'; usage: { input: number; output: number; total_tokens?: number; cache_hit_tokens?: number | null } }
+  /** 本回合已完成的精确用量（turn-local 累计） */
+  | { type: 'usage_turn'; usage: { input: number; output: number; cache_hit_tokens?: number | null } }
+  /** 当前流式调用的增量估算 */
+  | { type: 'usage_live'; input: number; output: number }
+  | { type: 'done'; interrupted: boolean }
   | { type: 'error'; message: string }
   | { type: 'messages'; messages: any[] }
   | { type: 'session_created'; name: string };

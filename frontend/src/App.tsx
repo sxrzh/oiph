@@ -1,13 +1,14 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { getContest, getProblem, getSessions, switchSession } from './api';
 import type { ContestData, ProblemDetail, SessionInfo } from './types';
+import type { UsageParts, WsMessage } from './api';
+import { zeroUsage } from './api';
 import { MenuBar, StatusBar } from './components/Layout';
 import { ProblemArea } from './components/ProblemArea';
 import { ChatArea } from './components/ChatArea';
 import { SessionBar } from './components/SessionBar';
 import { Questionnaire } from './components/Questionnaire';
 import type { AskQuestion, AskAnswer } from './components/Questionnaire';
-import type { WsMessage } from './api';
 
 interface DisplayMessage {
   role: string;
@@ -31,9 +32,12 @@ export default function App() {
   const [messages, setMessages] = useState<DisplayMessage[]>([]);
   const [children, setChildren] = useState<ChildSession[]>([]);
   const [streaming, setStreaming] = useState(false);
-  const [usage, setUsage] = useState<any>(null);
   const [askQuestions, setAskQuestions] = useState<AskQuestion[] | null>(null);
   const [leftWidth, setLeftWidth] = useState(45);
+  // Token 用量三块：全局基线（回合结束/连接/切换时更新）+ 本回合精确累计 + 当前流估算
+  const [usageBase, setUsageBase] = useState<UsageParts>(zeroUsage());
+  const [usageTurn, setUsageTurn] = useState<UsageParts>(zeroUsage());
+  const [usageLive, setUsageLive] = useState<{ input: number; output: number }>({ input: 0, output: 0 });
   const wsRef = useRef<WebSocket | null>(null);
   const currentMsgRef = useRef<DisplayMessage | null>(null);
   const currentAgentRef = useRef<string>('supervisor');
@@ -83,7 +87,16 @@ export default function App() {
   const handleMessagesLoaded = (raw: any[], rawChildren: any[], rawUsage?: any) => {
     setMessages(messagesToDisplay(raw));
     setChildren(rawChildren ?? []);
-    if (rawUsage) setUsage(rawUsage);
+    if (rawUsage) {
+      // 切换会话：用量基线重置为新 session 的持久化值，回合/流式清零
+      setUsageBase({
+        input: rawUsage.input ?? rawUsage.prompt_tokens ?? 0,
+        output: rawUsage.output ?? rawUsage.completion_tokens ?? 0,
+        hit: rawUsage.cache_hit_tokens ?? 0,
+      });
+      setUsageTurn(zeroUsage());
+      setUsageLive({ input: 0, output: 0 });
+    }
   };
 
   // 仅刷新 session 列表（轮询用，不动消息）
@@ -94,7 +107,7 @@ export default function App() {
     sessionNameRef.current = d.current;
   }, []);
 
-  // 初始加载：session 列表 + 当前会话历史消息（含持久化用量）
+  // 初始加载：session 列表 + 当前会话历史消息（含持久化用量基线）
   const loadSessions = useCallback(async () => {
     const d = await getSessions();
     setSessions(d.sessions);
@@ -105,11 +118,7 @@ export default function App() {
       if (r.ok && r.messages) {
         setMessages(messagesToDisplay(r.messages));
         setChildren(r.children ?? []);
-        if (r.usage) setUsage(r.usage);
-        else setUsage({ prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 });
       }
-    } else {
-      setUsage({ prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 });
     }
   }, []);
 
@@ -167,7 +176,26 @@ export default function App() {
       loadProblem();
       loadContest();
     } else if (msg.type === 'usage') {
-      setUsage((msg as any).usage);
+      // 全局基线更新：清空回合累计与流式估算
+      const u = (msg as any).usage;
+      setUsageBase({
+        input: u.input ?? 0,
+        output: u.output ?? 0,
+        hit: u.cache_hit_tokens ?? 0,
+      });
+      setUsageTurn(zeroUsage());
+      setUsageLive({ input: 0, output: 0 });
+    } else if (msg.type === 'usage_turn') {
+      // 本回合精确累计（基线之上）
+      const u = (msg as any).usage;
+      setUsageTurn({
+        input: u.input ?? 0,
+        output: u.output ?? 0,
+        hit: u.cache_hit_tokens ?? 0,
+      });
+      setUsageLive({ input: 0, output: 0 });
+    } else if (msg.type === 'usage_live') {
+      setUsageLive({ input: (msg as any).input ?? 0, output: (msg as any).output ?? 0 });
     } else if (msg.type === 'log') {
       // 其他日志不进对话区
     } else if (msg.type === 'done' || msg.type === 'error') {
@@ -180,7 +208,7 @@ export default function App() {
       } else if ((msg as any).interrupted) {
         setMessages(m => [...m, { role: 'system', content: '已中止' }]);
       }
-      if ('usage' in msg && msg.usage) setUsage(msg.usage);
+      // 全局用量随后由 usage 消息推送
     } else if (msg.type === 'session_created') {
       setCurrentSession((msg as any).name);
       sessionNameRef.current = (msg as any).name;
@@ -198,7 +226,8 @@ export default function App() {
   const handleSend = (text: string) => {
     setMessages(m => [...m, { role: 'user', content: text }]);
     setStreaming(true);
-    setUsage(null);
+    setUsageTurn(zeroUsage());
+    setUsageLive({ input: 0, output: 0 });
     wsRef.current?.send(JSON.stringify({ type: 'chat', text }));
   };
 
@@ -272,7 +301,15 @@ export default function App() {
           </ChatArea>
         </div>
       </div>
-      <StatusBar path={contest?.contest_dir ?? '无比赛工程'} usage={usage} />
+      {/* 显示用量 = 全局基线 + 本回合精确 + 当前流估算（只增不减） */}
+      <StatusBar
+        path={contest?.contest_dir ?? '无比赛工程'}
+        usage={{
+          input: usageBase.input + usageTurn.input + usageLive.input,
+          output: usageBase.output + usageTurn.output + usageLive.output,
+          hit: usageBase.hit + usageTurn.hit,
+        }}
+      />
     </div>
   );
 }

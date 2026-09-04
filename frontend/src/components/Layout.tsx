@@ -1,11 +1,12 @@
 import { exportLemon, runTest } from '../api';
+import { swAlert } from './sw';
 
 export function MenuBar({ onTestDone }: { onTestDone: () => void }) {
   return (
     <div className="menubar">
       <button onClick={async () => {
         const r = await exportLemon();
-        alert(r.ok ? `已导出到 ${r.path}` : r.error);
+        r.ok ? swAlert('导出成功', `已导出到 ${r.path}`) : swAlert('导出失败', r.error);
       }}>导出 Lemon</button>
       <button onClick={async () => {
         const r = await runTest();
@@ -14,7 +15,7 @@ export function MenuBar({ onTestDone }: { onTestDone: () => void }) {
           (rep.errors.length ? `  错误: ${rep.errors.length}个\n` : '') +
           (rep.warnings.length ? `  警告: ${rep.warnings.length}个\n` : '')
         ).join('\n') || '测试完成';
-        alert(text);
+        swAlert('集成测试结果', text);
         onTestDone();
       }}>集成测试</button>
       <span style={{ marginLeft: 'auto', fontSize: 12, color: 'var(--fg-muted)' }}>OI 组题助手</span>

@@ -120,6 +120,36 @@ pub struct ChatResult {
     pub interrupted: bool,
 }
 
+/// 粗略 token 估算：CJK 字符约 0.6 token/字，其他约 0.25 token/字符。
+fn is_cjk(c: char) -> bool {
+    matches!(c as u32,
+        0x4E00..=0x9FFF | 0x3400..=0x4DBF | 0x3000..=0x303F | 0xFF00..=0xFFEF)
+}
+
+fn estimate_text_tokens(text: &str) -> f64 {
+    let mut cjk = 0usize;
+    let mut other = 0usize;
+    for c in text.chars() {
+        if is_cjk(c) { cjk += 1 } else { other += 1 }
+    }
+    cjk as f64 * 0.6 + other as f64 * 0.25
+}
+
+fn estimate_message_tokens(m: &Message) -> f64 {
+    let mut n = 8.0; // 每条消息固定开销
+    if let Some(c) = &m.content {
+        n += estimate_text_tokens(c);
+    }
+    if let Some(tcs) = &m.tool_calls {
+        for tc in tcs {
+            n += estimate_text_tokens(&tc.function.name)
+                + estimate_text_tokens(&tc.function.arguments)
+                + 8.0;
+        }
+    }
+    n
+}
+
 // ---------------------------------------------------------------------------
 // 流式 SSE 解析结构
 // ---------------------------------------------------------------------------
@@ -193,7 +223,12 @@ pub struct Client {
 impl Client {
     pub fn new(base_url: String, api_key: String) -> Result<Self> {
         let http = reqwest::Client::builder()
-            .timeout(Duration::from_secs(180))
+            .connect_timeout(Duration::from_secs(30))
+            // 总超时放宽到 30 分钟：大响应（长思维链/大量工具调用参数）
+            // 流式生成可能远超 180s，超时会把流掐断报 decode 错误
+            .timeout(Duration::from_secs(1800))
+            // 空闲超时：两个 chunk 之间超过 120s 无数据才判定断流
+            .read_timeout(Duration::from_secs(120))
             .build()
             .context("构造 HTTP 客户端失败")?;
         Ok(Self { http, base_url, api_key })
@@ -224,7 +259,7 @@ impl Client {
         let resp = self.send_with_retry(&url, &body).await?;
 
         // Phase 2: 流式读取 SSE（含打断）
-        self.stream_response(resp, cancel, on_content, on_reasoning).await
+        self.stream_response(resp, messages, cancel, on_content, on_reasoning).await
     }
 
     /// 发送请求，含指数退避重试（网络错误 / 429 / 5xx）。
@@ -276,6 +311,7 @@ impl Client {
     async fn stream_response(
         &self,
         resp: reqwest::Response,
+        messages: &[Message],
         cancel: &CancelFlag,
         on_content: fn(&str),
         on_reasoning: fn(&str),
@@ -286,6 +322,22 @@ impl Client {
         let mut reasoning = String::new();
         let mut tool_calls: Vec<ToolCall> = Vec::new();
         let mut usage: Option<ChatUsage> = None;
+
+        // 流式期间的实时用量估算（API 只在流末尾给精确值）。
+        // 输入/输出（含思维链）都估算：CJK 字符约 0.6 token，其他约 0.25 token/字符。
+        let est_prompt = messages.iter().map(estimate_message_tokens).sum::<f64>();
+        let mut streamed_cjk = 0usize;
+        let mut streamed_other = 0usize;
+        let mut last_usage_push = std::time::Instant::now();
+        let send_live_usage = |est_prompt: f64, cjk: usize, other: usize| {
+            let completion = (cjk as f64 * 0.6 + other as f64 * 0.25).round() as u64;
+            let prompt = est_prompt.round() as u64;
+            crate::term::send_usage_json(&serde_json::json!({
+                "prompt_tokens": prompt,
+                "completion_tokens": completion,
+                "total_tokens": prompt + completion,
+            }).to_string());
+        };
 
         loop {
             tokio::select! {
@@ -309,10 +361,16 @@ impl Client {
                                                     if let Some(c) = &choice.delta.content {
                                                         content.push_str(c);
                                                         on_content(c);
+                                                        for ch in c.chars() {
+                                                            if is_cjk(ch) { streamed_cjk += 1 } else { streamed_other += 1 }
+                                                        }
                                                     }
                                                     if let Some(r) = &choice.delta.reasoning {
                                                         reasoning.push_str(r);
                                                         on_reasoning(r);
+                                                        for ch in r.chars() {
+                                                            if is_cjk(ch) { streamed_cjk += 1 } else { streamed_other += 1 }
+                                                        }
                                                     }
                                                     if let Some(tcs) = &choice.delta.tool_calls {
                                                         for tc in tcs {
@@ -335,6 +393,7 @@ impl Client {
                                                     }
                                                 }
                                                 if let Some(u) = &chunk.usage {
+                                                    // 精确用量到达（含思维链部分），覆盖估算值
                                                     usage = Some(ChatUsage {
                                                         prompt_tokens: u.prompt_tokens,
                                                         completion_tokens: u.completion_tokens,
@@ -342,6 +401,14 @@ impl Client {
                                                         cache_hit_tokens: u.prompt_cache_hit_tokens,
                                                         cache_miss_tokens: u.prompt_cache_miss_tokens,
                                                     });
+                                                    crate::term::send_usage_json(&serde_json::to_string(usage.as_ref().unwrap()).unwrap_or_default());
+                                                }
+                                                // 流式期间每 800ms 推送一次实时估算（思维链接收中也要更新）
+                                                if usage.is_none()
+                                                    && last_usage_push.elapsed() >= std::time::Duration::from_millis(800)
+                                                {
+                                                    last_usage_push = std::time::Instant::now();
+                                                    send_live_usage(est_prompt, streamed_cjk, streamed_other);
                                                 }
                                             }
                                             Err(e) => {

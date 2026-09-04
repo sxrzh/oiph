@@ -2,6 +2,11 @@
 
 配置文件的格式参考知识库中的 PROJECT_STRUCTURE.md。  
 如果没有特殊需要，建议所有测试点都写入 data_gen 中，由 generator 通过指定参数生成，而不是硬编码。
+当你确认无误之后，data_gen 中的测试点对应的 in/ans 文件需要从 data 目录中删除。
+
+务必只读取和写入本比赛工程目录及子目录下的文件，必要时也可以包括 `/tmp/`，**不要**用 bash 直接读取和写入工程目录和 `/tmp/` 以外的文件。
+
+请用 kb_search 获取知识库，**禁止**使用 `find` 在工程目录外查找文件名。
 
 ## 程序要求
 - 一律基于 testlib.h，符合 C++14。先用 get_testlib 获取 testlib.h（默认写到当前目录，编译时 -I 指定所在目录），checker 可用 get_checker 获取常见模板（wcmp/acmp/nyesno/rcmp 等）再修改。

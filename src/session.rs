@@ -32,6 +32,27 @@ pub struct ChildRef {
     pub summary: String,  // 简要描述
 }
 
+/// 累计 Token 用量（跨回合持久化）。
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct TokenUsage {
+    #[serde(default)]
+    pub prompt_tokens: u64,
+    #[serde(default)]
+    pub completion_tokens: u64,
+    #[serde(default)]
+    pub total_tokens: u64,
+    #[serde(default)]
+    pub cache_hit_tokens: Option<u64>,
+    #[serde(default)]
+    pub cache_miss_tokens: Option<u64>,
+}
+
+impl TokenUsage {
+    pub fn is_zero(&self) -> bool {
+        self.prompt_tokens == 0 && self.completion_tokens == 0
+    }
+}
+
 /// 主 session。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Session {
@@ -41,6 +62,9 @@ pub struct Session {
     pub messages: Vec<Message>,
     #[serde(default)]
     pub children: Vec<ChildRef>,
+    /// 本 session 累计的 Token 用量。
+    #[serde(default)]
+    pub usage: TokenUsage,
 }
 
 /// 子 session（仅消息列表）。
@@ -229,11 +253,28 @@ pub fn flush_pending_sub_sessions(
 }
 
 /// 保存消息到指定 session（含子 session）。
-pub fn save_messages(contest_dir: &Path, name: &str, messages: &[Message]) -> Result<()> {
+/// `add_usage` 为本回合新增的 Token 用量，累加到已有用量上。
+pub fn save_messages(
+    contest_dir: &Path,
+    name: &str,
+    messages: &[Message],
+    add_usage: &TokenUsage,
+) -> Result<()> {
     let now = Utc::now();
-    let (created_at, existing_children) = load(contest_dir, name)
-        .map(|s| (s.created_at, s.children))
-        .unwrap_or((now, Vec::new()));
+    let (created_at, existing_children, mut usage) = load(contest_dir, name)
+        .map(|s| (s.created_at, s.children, s.usage))
+        .unwrap_or((now, Vec::new(), TokenUsage::default()));
+    usage.prompt_tokens += add_usage.prompt_tokens;
+    usage.completion_tokens += add_usage.completion_tokens;
+    usage.total_tokens += add_usage.total_tokens;
+    usage.cache_hit_tokens = match (usage.cache_hit_tokens, add_usage.cache_hit_tokens) {
+        (Some(a), Some(b)) => Some(a + b),
+        (a, b) => a.or(b),
+    };
+    usage.cache_miss_tokens = match (usage.cache_miss_tokens, add_usage.cache_miss_tokens) {
+        (Some(a), Some(b)) => Some(a + b),
+        (a, b) => a.or(b),
+    };
     let children = flush_pending_sub_sessions(contest_dir, name, &existing_children)?;
     let session = Session {
         name: name.to_string(),
@@ -241,6 +282,7 @@ pub fn save_messages(contest_dir: &Path, name: &str, messages: &[Message]) -> Re
         updated_at: now,
         messages: messages.to_vec(),
         children,
+        usage,
     };
     save(contest_dir, &session)
 }
@@ -353,7 +395,7 @@ mod tests {
     #[test]
     fn save_load_list_roundtrip() {
         let c = tmp_contest();
-        save_messages(&c, "s1", &[Message::system("sys"), Message::user("hi")]).unwrap();
+        save_messages(&c, "s1", &[Message::system("sys"), Message::user("hi")], &TokenUsage::default()).unwrap();
         assert_eq!(current_name(&c).as_deref(), Some("s1"));
         let s = load(&c, "s1").unwrap();
         assert_eq!(s.name, "s1");
@@ -369,10 +411,10 @@ mod tests {
     #[test]
     fn sub_session_save_load() {
         let c = tmp_contest();
-        save_messages(&c, "s1", &[Message::user("hi")]).unwrap();
+        save_messages(&c, "s1", &[Message::user("hi")], &TokenUsage::default()).unwrap();
         // 模拟 pending sub session
         push_pending_sub_session("solution".into(), vec![Message::user("sub task")], "写std".into());
-        save_messages(&c, "s1", &[Message::user("hi"), Message { role: "assistant".into(), content: Some("result".into()), tool_calls: None, tool_call_id: None, reasoning: None }]).unwrap();
+        save_messages(&c, "s1", &[Message::user("hi"), Message { role: "assistant".into(), content: Some("result".into()), tool_calls: None, tool_call_id: None, reasoning: None }], &TokenUsage::default()).unwrap();
         let s = load(&c, "s1").unwrap();
         assert_eq!(s.children.len(), 1);
         assert_eq!(s.children[0].filename, "sub-1.json");
@@ -388,7 +430,7 @@ mod tests {
     fn auto_name_unique() {
         let c = tmp_contest();
         let n1 = auto_name(&c).unwrap();
-        save_messages(&c, &n1, &[Message::user("x")]).unwrap();
+        save_messages(&c, &n1, &[Message::user("x")], &TokenUsage::default()).unwrap();
         let n2 = auto_name(&c).unwrap();
         assert_ne!(n1, n2);
         std::fs::remove_dir_all(&c).ok();
@@ -405,9 +447,9 @@ mod tests {
     #[test]
     fn last_uses_current_pointer() {
         let c = tmp_contest();
-        save_messages(&c, "a", &[Message::user("a")]).unwrap();
+        save_messages(&c, "a", &[Message::user("a")], &TokenUsage::default()).unwrap();
         std::thread::sleep(std::time::Duration::from_millis(1100));
-        save_messages(&c, "b", &[Message::user("b")]).unwrap();
+        save_messages(&c, "b", &[Message::user("b")], &TokenUsage::default()).unwrap();
         set_current(&c, "a").unwrap();
         let s = last(&c).unwrap().unwrap();
         assert_eq!(s.name, "a");
@@ -421,7 +463,7 @@ mod tests {
     fn export_markdown_contains_messages() {
         let s = Session {
             name: "t".into(), created_at: Utc::now(), updated_at: Utc::now(),
-            messages: vec![Message::user("hello")], children: vec![],
+            messages: vec![Message::user("hello")], children: vec![], usage: Default::default(),
         };
         let md = export_markdown(&s);
         assert!(md.contains("hello"));

@@ -86,6 +86,11 @@ pub fn send_usage(usage_json: &str) {
     ws_send(&format!(r#"{{"type":"usage","usage":{usage_json}}}"#));
 }
 
+/// 内部使用：直接推送用量 JSON（client 流式估算用，不经 println）。
+pub fn send_usage_json(usage_json: &str) {
+    ws_send(&format!(r#"{{"type":"usage","usage":{usage_json}}}"#));
+}
+
 /// 工具调用结构化消息（GUI 完整显示，不截断）。
 pub fn send_tool_call(name: &str, args: &serde_json::Value) {
     ws_send(&format!(
@@ -103,9 +108,19 @@ pub fn send_tool_result(result: &str) {
     ));
 }
 
-/// 步骤边界：通知前端新开一条消息（思维链/内容）。
-pub fn send_step_boundary() {
-    ws_send(r#"{"type":"step_boundary"}"#);
+/// 步骤边界：通知前端新开一条消息（思维链/内容），并告知当前 agent。
+pub fn send_step_boundary(agent: &str) {
+    ws_send(&format!(
+        r#"{{"type":"step_boundary","agent":{}}}"#,
+        serde_json::to_string(agent).unwrap_or_default()
+    ));
+}
+
+/// 向前端推送问卷（ask_user 工具）。questions 为 JSON 数组字符串。
+pub fn send_ask_user(questions_json: &str) {
+    ws_send(&format!(
+        r#"{{"type":"ask_user","questions":{questions_json}}}"#
+    ));
 }
 
 /// 打印思维链。CLI 模式过长时只显示最后 300 字符（GUI 模式显示完整）。
@@ -167,6 +182,11 @@ impl CancelFlag {
     pub fn cancel(&self) {
         self.cancelled.store(true, Ordering::Relaxed);
         self.notify.notify_waiters();
+    }
+
+    /// 重置取消标志（新回合开始时调用）。
+    pub fn reset(&self) {
+        self.cancelled.store(false, Ordering::Relaxed);
     }
 
     pub fn is_cancelled(&self) -> bool {

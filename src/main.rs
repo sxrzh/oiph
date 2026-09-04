@@ -22,6 +22,7 @@ mod project;
 mod prompts;
 mod server;
 mod session;
+mod snapshot;
 mod skills;
 mod state;
 mod term;
@@ -557,6 +558,7 @@ fn run_session_cmd(cli: &Cli, cmd: &SessionCmd) -> Result<()> {
                 updated_at: chrono::Utc::now(),
                 messages: Vec::new(),
                 children: vec![],
+                usage: Default::default(),
             };
             session::save(&cdir, &s)?;
             println!("已新建并切换到会话 '{name}'");
@@ -689,6 +691,8 @@ async fn run_repl(cli: &Cli, root: &Path) -> Result<()> {
 
     // 在比赛工程下自动加载上一次的 session
     let mut current_session: Option<String> = None;
+    // 本回合累计用量（保存时并入 session 的持久化用量）
+    let mut pending_usage = session::TokenUsage::default();
     let mut messages: Vec<Message> = match &contest_dir {
         Some(c) => match session::last(c) {
             Ok(Some(s)) => {
@@ -700,6 +704,18 @@ async fn run_repl(cli: &Cli, root: &Path) -> Result<()> {
                 current_session = Some(name);
                 if tty {
                     println!("已加载会话：{}", current_session.as_deref().unwrap_or(""));
+                    // 恢复本 session 的历史累计用量
+                    let u = &s.usage;
+                    if !u.is_zero() {
+                        term::println_err(&format!(
+                            "📊 本 session 历史用量：输入 {} / 输出 {}{}",
+                            u.prompt_tokens,
+                            u.completion_tokens,
+                            u.cache_hit_tokens
+                                .map(|h| format!(" / 缓存命中 {h}"))
+                                .unwrap_or_default()
+                        ));
+                    }
                 }
                 msgs
             }
@@ -777,6 +793,37 @@ async fn run_repl(cli: &Cli, root: &Path) -> Result<()> {
         messages.push(Message::user(trimmed.clone()));
         let deps = app.deps();
 
+        // 第一条消息时创建 session（CLI 与 GUI 行为一致）
+        if current_session.is_none()
+            && let Some(cdir) = app.contest_dir()
+        {
+            match session::auto_name(&cdir) {
+                Ok(name) => {
+                    let s = session::Session {
+                        name: name.clone(),
+                        created_at: chrono::Utc::now(),
+                        updated_at: chrono::Utc::now(),
+                        messages: messages.clone(),
+                        children: vec![],
+                        usage: Default::default(),
+                    };
+                    let _ = session::save(&cdir, &s);
+                    current_session = Some(name);
+                }
+                Err(e) => eprintln!("创建会话失败：{e:#}"),
+            }
+        }
+
+        // 增量保存：工具调用等每步变化都落盘
+        let (save_tx, mut save_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<Message>>();
+        let saver = current_session.clone().zip(app.contest_dir()).map(|(name, cdir)| {
+            tokio::spawn(async move {
+                while let Some(msgs) = save_rx.recv().await {
+                    let _ = session::save_messages(&cdir, &name, &msgs, &session::TokenUsage::default());
+                }
+            })
+        });
+
         // 启用 raw 模式 + Esc 监视
         let cancel = term::CancelFlag::new();
         let raw_ok = tty && crossterm::terminal::enable_raw_mode().is_ok();
@@ -796,8 +843,13 @@ async fn run_repl(cli: &Cli, root: &Path) -> Result<()> {
             true,  // supervisor 实时打印流式内容
             true,  // supervisor 显示思维链
             &cancel,
+            Some(&save_tx),
         )
         .await;
+        drop(save_tx);
+        if let Some(s) = saver {
+            let _ = s.await;
+        }
 
         // 恢复终端
         drop(watcher);
@@ -808,6 +860,21 @@ async fn run_repl(cli: &Cli, root: &Path) -> Result<()> {
 
         match result {
             Ok(turn_result) => {
+                // 累计本回合用量
+                if let Some(u) = &turn_result.usage {
+                    let p = &mut pending_usage;
+                    p.prompt_tokens += u.prompt_tokens;
+                    p.completion_tokens += u.completion_tokens;
+                    p.total_tokens += u.total_tokens;
+                    p.cache_hit_tokens = match (p.cache_hit_tokens, u.cache_hit_tokens) {
+                        (Some(a), Some(b)) => Some(a + b),
+                        (a, b) => a.or(b),
+                    };
+                    p.cache_miss_tokens = match (p.cache_miss_tokens, u.cache_miss_tokens) {
+                        (Some(a), Some(b)) => Some(a + b),
+                        (a, b) => a.or(b),
+                    };
+                }
                 if turn_result.interrupted {
                     term::println_err("\n⚠ 已打断（保留已有输出）");
                 } else if turn_result.text.trim().is_empty() && !messages.is_empty() {
@@ -822,14 +889,20 @@ async fn run_repl(cli: &Cli, root: &Path) -> Result<()> {
             }
         }
         // 保存会话
-        save_current_session(&app, &messages, &mut current_session);
+        save_current_session(&app, &messages, &mut current_session, &pending_usage);
+        pending_usage = session::TokenUsage::default();
     }
 
     // 保存历史
     let _ = rl.save_history(&dirs_for_history());
     Ok(())
 }
-fn save_current_session(app: &App, messages: &[Message], current_session: &mut Option<String>) {
+fn save_current_session(
+    app: &App,
+    messages: &[Message],
+    current_session: &mut Option<String>,
+    add_usage: &session::TokenUsage,
+) {
     let Some(cdir) = app.contest_dir() else {
         return;
     };
@@ -846,7 +919,7 @@ fn save_current_session(app: &App, messages: &[Message], current_session: &mut O
             }
         },
     };
-    if let Err(e) = session::save_messages(&cdir, &name, messages) {
+    if let Err(e) = session::save_messages(&cdir, &name, messages, add_usage) {
         eprintln!("保存会话失败：{e:#}");
     }
 }
@@ -919,6 +992,36 @@ async fn handle_slash(
             handle_slash_session(app, args, messages, current_session).await?;
             Ok(SlashOutcome::Continue)
         }
+        "undo" => {
+            match app.snapshot_undo(messages.len()) {
+                Ok(Some(point)) => {
+                    messages.truncate(point.msg_len);
+                    println!(
+                        "已回滚到快照 {}（对话已同步回退到 {} 条消息）",
+                        &point.hash[..8.min(point.hash.len())],
+                        point.msg_len
+                    );
+                }
+                Ok(None) => println!("没有可回滚的快照"),
+                Err(e) => eprintln!("回滚失败：{e:#}"),
+            }
+            Ok(SlashOutcome::Continue)
+        }
+        "redo" => {
+            match app.snapshot_redo(messages.len()) {
+                Ok(Some(point)) => {
+                    messages.truncate(point.msg_len);
+                    println!(
+                        "已重做到快照 {}（对话已同步恢复到 {} 条消息）",
+                        &point.hash[..8.min(point.hash.len())],
+                        point.msg_len
+                    );
+                }
+                Ok(None) => println!("没有可重做的快照"),
+                Err(e) => eprintln!("重做失败：{e:#}"),
+            }
+            Ok(SlashOutcome::Continue)
+        }
         other => {
             eprintln!("未知指令 /{other}，输入 /help 查看可用指令");
             Ok(SlashOutcome::Continue)
@@ -948,6 +1051,8 @@ fn print_help() {
   /session use <名>   切换会话
   /session delete <名> 删除会话
   /session export [名] [路径]  导出会话为 markdown
+  /undo               回滚工作区到上一个快照（AI 操作前）
+  /redo               重做（恢复回滚前的状态）
   /exit               退出
 
 其余输入将交给 supervisor agent（对话自动保存到 <比赛工程>/.oiph/sessions/）。
@@ -1180,7 +1285,7 @@ async fn handle_slash_session(
         }
         ["new"] | ["new", _] => {
             // 先保存当前
-            save_current_session(app, messages, current_session);
+            save_current_session(app, messages, current_session, &session::TokenUsage::default());
             let name = match args.get(1) {
                 Some(n) => session::sanitize_name(n)?,
                 None => session::auto_name(&cdir)?,
@@ -1195,6 +1300,7 @@ async fn handle_slash_session(
                 updated_at: chrono::Utc::now(),
                 messages: messages.clone(),
                 children: vec![],
+                usage: Default::default(),
             };
             session::save(&cdir, &s)?;
             *current_session = Some(name.clone());
@@ -1204,7 +1310,7 @@ async fn handle_slash_session(
             if !session::exists(&cdir, name) {
                 bail!("会话 '{name}' 不存在");
             }
-            save_current_session(app, messages, current_session);
+            save_current_session(app, messages, current_session, &session::TokenUsage::default());
             let s = session::load(&cdir, name)?;
             *messages = s.messages.clone();
             if messages.is_empty() || messages[0].role != "system" {

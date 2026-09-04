@@ -1,10 +1,14 @@
 import { useEffect, useRef, useState } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkMath from 'remark-math';
+import rehypeKatex from 'rehype-katex';
 import { Spoiler } from './Spoiler';
 
 interface DisplayMessage {
   role: string;
   content: string;
   toolCalls?: string;
+  agent?: string;
 }
 
 interface ChildSession {
@@ -20,18 +24,24 @@ interface SubMessage {
 
 export function ChatArea({
   messages,
-  children,
+  childSessions,
   sessionName,
   streaming,
   onSend,
   onStop,
+  onUndo,
+  onRedo,
+  children: questionnaire,
 }: {
   messages: DisplayMessage[];
-  children: ChildSession[];
+  childSessions: ChildSession[];
   sessionName: string | null;
   streaming: boolean;
   onSend: (text: string) => void;
   onStop: () => void;
+  onUndo: () => void;
+  onRedo: () => void;
+  children?: React.ReactNode;
 }) {
   const [input, setInput] = useState('');
   const chatRef = useRef<HTMLDivElement>(null);
@@ -46,6 +56,7 @@ export function ChatArea({
     setInput('');
   };
 
+  // Track which tool result message corresponds to which child session
   let childIndex = 0;
 
   return (
@@ -54,16 +65,17 @@ export function ChatArea({
         {messages.map((msg, i) => {
           const isSubAgentResult = msg.role === 'tool' && msg.content.includes('[sub-session]');
           let child: ChildSession | null = null;
-          if (isSubAgentResult && childIndex < children.length) {
-            child = children[childIndex++];
+          if (isSubAgentResult && childIndex < childSessions.length) {
+            child = childSessions[childIndex++];
           }
           // 思维链消息用 spoiler 包裹
           if (msg.role === 'reasoning') {
-            return <ReasoningMessageView key={i} content={msg.content} />;
+            return <ReasoningMessageView key={i} content={msg.content} agent={msg.agent} />;
           }
           return <ChatMessageView key={i} msg={msg} child={child} sessionName={sessionName} />;
         })}
       </div>
+      {questionnaire}
       <div className="input-area">
         <textarea
           className="chat-input"
@@ -78,17 +90,21 @@ export function ChatArea({
         {streaming ? (
           <button className="btn-stop" onClick={onStop}>中止</button>
         ) : (
-          <button className="btn-send" onClick={handleSend}>发送</button>
+          <>
+            <button className="btn" onClick={onUndo} title="回滚工作区到上一个快照">↩ Undo</button>
+            <button className="btn" onClick={onRedo} title="恢复回滚前的状态">↪ Redo</button>
+            <button className="btn-send" onClick={handleSend}>发送</button>
+          </>
         )}
       </div>
     </>
   );
 }
 
-function ReasoningMessageView({ content }: { content: string }) {
+function ReasoningMessageView({ content, agent }: { content: string; agent?: string }) {
   return (
     <div className="msg reasoning" style={{ background: 'var(--bg-tab)', maxWidth: '85%', alignSelf: 'flex-start' }}>
-      <Spoiler title={`🧠 思维链（${content.length} 字符）`} defaultOpen={false}>
+      <Spoiler title={`🧠 ${agent ?? 'agent'} 的思维链（${content.length} 字符）`} defaultOpen={false}>
         <div style={{ whiteSpace: 'pre-wrap', fontSize: 12, color: 'var(--fg-muted)', maxHeight: '400px', overflow: 'auto' }}>
           {content}
         </div>
@@ -112,16 +128,25 @@ function ChatMessageView({
     msg.role === 'system' ? '系统' : msg.role;
   const displayContent = msg.content.replace('[sub-session]', '').trim();
 
+  // 只有 agent 的对话渲染 Markdown（含 LaTeX 公式），工具调用/用户消息/思维链纯文本
+  const body = msg.role === 'assistant' ? (
+    <div className="md-body">
+      <ReactMarkdown remarkPlugins={[remarkMath]} rehypePlugins={[rehypeKatex]}>
+        {displayContent}
+      </ReactMarkdown>
+    </div>
+  ) : (
+    <div className="text" style={{ whiteSpace: 'pre-wrap' }}>{displayContent}</div>
+  );
+
   return (
     <div className={`msg ${msg.role}`}>
       <div className="role-tag">{roleTag}</div>
-      <div className="text">
-        {displayContent}
-        {msg.toolCalls && <div className="tool-call" style={{ marginTop: '4px' }}>{msg.toolCalls}</div>}
-        {child && sessionName && (
-          <SubSessionSpoiler child={child} sessionName={sessionName} />
-        )}
-      </div>
+      {body}
+      {msg.toolCalls && <div className="tool-call" style={{ marginTop: '4px' }}>{msg.toolCalls}</div>}
+      {child && sessionName && (
+        <SubSessionSpoiler child={child} sessionName={sessionName} />
+      )}
     </div>
   );
 }

@@ -27,6 +27,8 @@ contest_name
         - solutions
             - std.cpp        # 标准答案
             - <name>.cpp     # 其他解法（暴力、错误解法等）
+        - tutorial
+            - zh_cn.md
     - problem_name_b
         - ...
 

@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type { SessionInfo } from '../types';
 import { newSession, switchSession } from '../api';
+import { swAlert } from './sw';
 
 export function SessionBar({
   sessions,
@@ -11,7 +12,7 @@ export function SessionBar({
   sessions: SessionInfo[];
   current: string | null;
   onSwitched: () => void;
-  onMessagesLoaded: (messages: any[], children: any[]) => void;
+  onMessagesLoaded: (messages: any[], children: any[], usage?: any) => void;
 }) {
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState('');
@@ -23,7 +24,7 @@ export function SessionBar({
       setCreating(false);
       onSwitched();
     } else {
-      alert(r.error);
+      swAlert('错误', r.error);
     }
   };
 
@@ -31,10 +32,10 @@ export function SessionBar({
     const r = await switchSession(n);
     if (r.ok) {
       // 直接渲染返回的历史消息
-      if (onMessagesLoaded) onMessagesLoaded(r.messages ?? [], r.children ?? []);
+      if (onMessagesLoaded) onMessagesLoaded(r.messages ?? [], r.children ?? [], r.usage);
       onSwitched();
     } else {
-      alert(r.error);
+      swAlert('错误', r.error);
     }
   };
 

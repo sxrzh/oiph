@@ -1,5 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
 import { getFile, saveFile } from '../api';
+import { swAlert, swConfirm } from './sw';
+import { CodeEditor, type EditorLanguage } from './CodeEditor';
+
+function langForPath(path: string): EditorLanguage {
+  const lower = path.toLowerCase();
+  if (lower.endsWith('.md')) return 'markdown';
+  return 'cpp'; // .cpp/.h/.in/.ans 等 C++ 竞赛文件默认 cpp 高亮
+}
 
 export function FileEditor({ pid, filePath }: { pid: string; filePath: string }) {
   const [content, setContent] = useState('');
@@ -22,7 +30,6 @@ export function FileEditor({ pid, filePath }: { pid: string; filePath: string })
         setOriginal(d.content);
       }
     });
-    return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, [pid, filePath]);
 
   useEffect(() => {
@@ -30,10 +37,12 @@ export function FileEditor({ pid, filePath }: { pid: string; filePath: string })
       if (!dirty) {
         getFile(`${pid}/${filePath}`).then(d => {
           if (!d.error && d.content !== original && d.content !== content) {
-            if (confirm('文件已被外部修改，是否重新加载？')) {
-              setContent(d.content);
-              setOriginal(d.content);
-            }
+            swConfirm('文件已被外部修改', '是否重新加载？').then(yes => {
+              if (yes) {
+                setContent(d.content);
+                setOriginal(d.content);
+              }
+            });
           }
         });
       }
@@ -48,7 +57,7 @@ export function FileEditor({ pid, filePath }: { pid: string; filePath: string })
       setDirty(false);
       setSaved(true);
     } else {
-      alert(r.error);
+      swAlert('保存失败', r.error);
     }
   };
 
@@ -62,11 +71,10 @@ export function FileEditor({ pid, filePath }: { pid: string; filePath: string })
         </button>
         {dirty && <span style={{ color: 'var(--yellow)', fontSize: 12 }}>未保存</span>}
       </div>
-      <textarea
-        className="editor"
-        style={{ flex: 1, minHeight: '300px' }}
+      <CodeEditor
         value={content}
-        onChange={e => { setContent(e.target.value); setDirty(e.target.value !== original); setSaved(false); }}
+        onChange={v => { setContent(v); setDirty(v !== original); setSaved(false); }}
+        language={langForPath(filePath)}
       />
     </div>
   );

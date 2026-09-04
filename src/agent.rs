@@ -56,6 +56,7 @@ pub const SUPERVISOR_TOOLS: &[&str] = &[
     "check_std",
     "check_solutions",
     "test_integrity",
+    "ask_user",
     "call_searching_agent",
     "call_statement_agent",
     "call_solution_agent",
@@ -212,6 +213,29 @@ pub fn definition(name: &str) -> Option<Tool> {
                     }
                 }),
             },
+            "ask_user" => FunctionDef {
+                name: "ask_user".into(),
+                description: "向用户展示问卷并等待回答。一次可包含多个问题（单选/多选/填空）。问题会显示在界面上，用户提交或取消后返回。需要用户决策、确认方案、选择选项时使用。".into(),
+                parameters: serde_json::json!({
+                    "type": "object",
+                    "properties": {
+                        "questions": {
+                            "type": "array",
+                            "description": "问题列表，每项一个问题。",
+                            "items": {
+                                "type": "object",
+                                "properties": {
+                                    "type": { "type": "string", "enum": ["single", "multi", "text"], "description": "single=单选，multi=多选，text=填空。" },
+                                    "question": { "type": "string", "description": "问题描述。" },
+                                    "options": { "type": "array", "items": { "type": "string" }, "description": "单选/多选的选项列表（text 类型不需要）。" }
+                                },
+                                "required": ["type", "question"]
+                            }
+                        }
+                    },
+                    "required": ["questions"]
+                }),
+            },
             "call_searching_agent" => sub_agent_def(
                 "call_searching_agent",
                 "调用 searching-agent：搜索冷门题目与资料，估计难度与知识点。task 需自包含。",
@@ -306,6 +330,7 @@ pub async fn run_turn(
     stream_content: bool,
     stream_reasoning: bool,
     cancel: &CancelFlag,
+    progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<Vec<Message>>>,
 ) -> Result<TurnResult> {
     let tool_defs = definitions_for(role);
     let on_content: fn(&str) = if stream_content { term::print_content } else { term::noop };
@@ -314,6 +339,15 @@ pub async fn run_turn(
     // searching-agent 的搜索调用计数（web_search + fetch_url），超过上限则停止
     let mut search_call_count: u32 = 0;
     const SEARCH_LIMIT: u32 = 30;
+    // 子 Agent 模型调用连续失败上限：超过则放弃（错误信息已注入对话让其重试过）
+    let mut consecutive_errors: u32 = 0;
+    const MAX_CONSECUTIVE_ERRORS: u32 = 3;
+    // 增量保存：每次消息变化后把对话快照发给调用方（GUI/CLI 用其落盘）
+    let push_progress = |messages: &[Message]| {
+        if let Some(tx) = progress_tx {
+            let _ = tx.send(messages.to_vec());
+        }
+    };
 
     for step in 1..=deps.max_steps {
         if cancel.is_cancelled() {
@@ -328,7 +362,7 @@ pub async fn run_turn(
         if stream_reasoning {
             term::reset_reasoning_buf();
         }
-        term::send_step_boundary();
+        term::send_step_boundary(prompts::role_name(role));
 
         term::println_err(&format!(
             "--- [{}] step {step}: 调用模型 ---",
@@ -344,9 +378,32 @@ pub async fn run_turn(
         let role_name = prompts::role_name(role);
         let client = app.client_for(role_name).unwrap_or_else(|| app.client.clone());
 
-        let result = client
+        let result = match client
             .chat_stream(deps.model, messages, &tool_defs, cancel, on_content, on_reasoning)
-            .await?;
+            .await
+        {
+            Ok(r) => {
+                consecutive_errors = 0;
+                r
+            }
+            Err(e) => {
+                consecutive_errors += 1;
+                let role_disp = prompts::role_name(role);
+                term::println_err(&format!(
+                    "[{role_disp}] 模型调用失败（第 {consecutive_errors} 次）：{e:#}"
+                ));
+                // 子 Agent：把错误信息作为消息返回给它继续；连续失败过多才放弃。
+                // supervisor 维持原行为（错误直接呈现给用户）。
+                if role != Role::Supervisor && consecutive_errors < MAX_CONSECUTIVE_ERRORS {
+                    messages.push(Message::user(format!(
+                        "[系统] 上一次模型调用失败（{e:#}）。请从当前进度继续完成任务，\
+不要重复已完成的工作。"
+                    )));
+                    continue;
+                }
+                return Err(e);
+            }
+        };
 
         // 累加 usage
         if let Some(u) = &result.usage {
@@ -406,6 +463,7 @@ pub async fn run_turn(
         if tool_calls.is_empty() {
             let text = assistant_msg.content.clone().unwrap_or_default();
             messages.push(assistant_msg);
+            push_progress(messages);
             return Ok(TurnResult {
                 text,
                 interrupted: false,
@@ -414,6 +472,7 @@ pub async fn run_turn(
         }
 
         messages.push(assistant_msg);
+        push_progress(messages);
 
         for (call_idx, call) in tool_calls.iter().enumerate() {
             if cancel.is_cancelled() {
@@ -457,7 +516,12 @@ pub async fn run_turn(
 
             term::println_err(&format!("工具调用：{name}({})", args_summary(&args)));
             term::send_tool_call(name, &args);
-            term::send_step_boundary();
+            term::send_step_boundary(prompts::role_name(role));
+            // 工具执行前捕获工作区快照（供 /undo 回滚；仅 supervisor，
+            // 快照点需与 supervisor 对话消息数对应）
+            if role == Role::Supervisor {
+                app.snapshot_capture(messages.len());
+            }
             let cancel_clone = cancel.clone();
             let dispatch_fut = Box::pin(dispatch(role, app, &ctx, deps, cancel, name, &args));
             let tool_name_for_wait = name.clone();
@@ -483,6 +547,7 @@ pub async fn run_turn(
             term::send_tool_result(&dispatch_result);
             term::println_err(&format!("-> {}", summary_line(&dispatch_result)));
             messages.push(Message::tool(dispatch_result, call.id.clone()));
+            push_progress(messages);
             if cancel.is_cancelled() {
                 return Ok(TurnResult {
                     text: String::new(),
@@ -554,6 +619,7 @@ pub async fn dispatch(
             "check_std" => Some(tool_check(ctx, args, "std").await),
             "check_solutions" => Some(tool_check(ctx, args, "sols").await),
             "test_integrity" => Some(tool_test_integrity(ctx, args).await),
+            "ask_user" => Some(tool_ask_user(app, cancel, args).await),
             "call_searching_agent" => Some(call_sub_agent(Role::Searching, app, ctx, deps, cancel, args).await),
             "call_statement_agent" => Some(call_sub_agent(Role::Statement, app, ctx, deps, cancel, args).await),
             "call_solution_agent" => Some(call_sub_agent(Role::Solution, app, ctx, deps, cancel, args).await),
@@ -933,6 +999,45 @@ async fn tool_test_integrity(ctx: &ToolContext, args: &Value) -> String {
     out
 }
 
+/// ask_user 工具：向前端推送问卷，等待用户提交/取消（或用户中止对话）。
+async fn tool_ask_user(app: &App, cancel: &CancelFlag, args: &Value) -> String {
+    let questions = match args.get("questions") {
+        Some(q) => q.clone(),
+        None => return err_str(anyhow!("缺少 questions 参数")),
+    };
+    if !questions.is_array() || questions.as_array().is_some_and(|a| a.is_empty()) {
+        return err_str(anyhow!("questions 必须是非空数组"));
+    }
+
+    // 答案回传通道
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Value>();
+    app.register_ask_answer(tx);
+
+    // 推送问卷到前端
+    crate::term::send_ask_user(&questions.to_string());
+
+    // 等待答案 / 问卷取消 / 对话中止
+    let result = tokio::select! {
+        answer = rx.recv() => {
+            match answer {
+                Some(v) if v.get("cancelled").is_some_and(|c| c.as_bool() == Some(true)) => {
+                    "[用户取消了问卷，未提供任何回答]".to_string()
+                }
+                Some(answers) => {
+                    format!("用户已回答问卷：\n{}", serde_json::to_string_pretty(&answers).unwrap_or_default())
+                }
+                None => "[问卷通道关闭]".to_string(),
+            }
+        }
+        _ = cancel.wait() => {
+            "[用户中止了对话，问卷已作废]".to_string()
+        }
+    };
+
+    app.take_ask_answer();
+    result
+}
+
 // ---------------------------------------------------------------------------
 // 子 Agent 调用
 // ---------------------------------------------------------------------------
@@ -1003,6 +1108,7 @@ async fn call_sub_agent(
         false,  // 子 Agent 不实时打印内容
         true,   // 子 Agent 显示思维链
         cancel, // 透传 supervisor 的打断信号
+        None,   // 子 Agent 不做增量保存
     )
     .await;
 

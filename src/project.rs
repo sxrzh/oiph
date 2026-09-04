@@ -426,7 +426,7 @@ pub fn problem_status_text(p: &Problem, contest_dir: &Path) -> String {
             ));
         }
     }
-    out.push_str(&format!("data（{}）：{}\n", p.data.data_type.label(), p.data.status.label()));
+    out.push_str(&format!("data：{}\n", p.data.status.label()));
     out.push_str(&format!("validator：{}\n", p.validator.status.label()));
     out.push_str(&format!("checker：{}\n", p.checker.status.label()));
     if let Some(il) = &p.interactive_lib {

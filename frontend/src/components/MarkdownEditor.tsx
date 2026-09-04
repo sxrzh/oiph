@@ -3,6 +3,8 @@ import ReactMarkdown from 'react-markdown';
 import remarkMath from 'remark-math';
 import rehypeKatex from 'rehype-katex';
 import { getFile, saveFile } from '../api';
+import { swAlert, swConfirm } from './sw';
+import { CodeEditor } from './CodeEditor';
 
 export function MarkdownEditor({ pid, filePath }: { pid: string; filePath: string }) {
   const [content, setContent] = useState('');
@@ -24,9 +26,6 @@ export function MarkdownEditor({ pid, filePath }: { pid: string; filePath: strin
         setOriginal(d.content);
       }
     });
-    return () => {
-      if (pollRef.current) clearInterval(pollRef.current);
-    };
   }, [pid, filePath]);
 
   // Poll for external file changes
@@ -35,10 +34,12 @@ export function MarkdownEditor({ pid, filePath }: { pid: string; filePath: strin
       if (!dirty) {
         getFile(`${pid}/${filePath}`).then(d => {
           if (!d.error && d.content !== original && d.content !== content) {
-            if (confirm('文件已被外部修改，是否重新加载？')) {
-              setContent(d.content);
-              setOriginal(d.content);
-            }
+            swConfirm('文件已被外部修改', '是否重新加载？').then(yes => {
+              if (yes) {
+                setContent(d.content);
+                setOriginal(d.content);
+              }
+            });
           }
         });
       }
@@ -50,7 +51,6 @@ export function MarkdownEditor({ pid, filePath }: { pid: string; filePath: strin
     setContent(v);
     setDirty(v !== original);
     setSaved(false);
-    // Debounce: nothing to debounce for editing, only preview is debounced
   };
 
   const handleSave = async () => {
@@ -60,7 +60,7 @@ export function MarkdownEditor({ pid, filePath }: { pid: string; filePath: strin
       setDirty(false);
       setSaved(true);
     } else {
-      alert(r.error);
+      swAlert('保存失败', r.error);
     }
   };
 
@@ -76,13 +76,7 @@ export function MarkdownEditor({ pid, filePath }: { pid: string; filePath: strin
         {dirty && <span style={{ color: 'var(--yellow)', fontSize: 12 }}>未保存</span>}
       </div>
       <div style={{ display: 'flex', gap: '8px', flex: 1, minHeight: 0 }}>
-        <textarea
-          className="editor"
-          style={{ flex: 1 }}
-          value={content}
-          onChange={e => handleChange(e.target.value)}
-          placeholder="输入 Markdown..."
-        />
+        <CodeEditor value={content} onChange={handleChange} language="markdown" />
         {showPreview && (
           <div className="markdown-preview" style={{ flex: 1, overflow: 'auto' }}>
             <DebouncedPreview content={content} />

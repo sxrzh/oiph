@@ -46,6 +46,7 @@ export interface SwitchSessionResp {
   name?: string;
   messages?: { role: string; content: string | null; tool_calls?: any[] }[];
   children?: { filename: string; agent: string; summary: string }[];
+  usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number; cache_hit_tokens?: number | null };
 }
 
 export async function exportLemon(): Promise<{ ok?: boolean; path?: string; error?: string }> {
@@ -62,7 +63,9 @@ export type WsMessage =
   | { type: 'log'; text: string }
   | { type: 'tool_call'; name: string; args: any }
   | { type: 'tool_result'; text: string }
-  | { type: 'step_boundary' }
+  | { type: 'step_boundary'; agent?: string }
+  | { type: 'snapshot_done' }
+  | { type: 'ask_user'; questions: any[] }
   | { type: 'usage'; usage: any }
   | { type: 'done'; interrupted: boolean; usage?: any }
   | { type: 'error'; message: string }

@@ -31,19 +31,44 @@ struct ServerState {
     messages: Arc<Mutex<Vec<ChatMessage>>>,
     current_session: Arc<Mutex<Option<String>>>,
     cancel: CancelFlag,
+    /// 本回合累计 Token 用量（保存 session 时持久化并清零）。
+    pending_usage: Arc<std::sync::Mutex<session_mod::TokenUsage>>,
+    /// session 持久化的累计用量（状态栏基线）。
+    saved_usage: Arc<std::sync::Mutex<session_mod::TokenUsage>>,
+}
+
+/// 当前总用量 = 持久化基线 + 本回合未保存部分。
+fn total_usage(st: &ServerState) -> session_mod::TokenUsage {
+    let saved = st.saved_usage.lock().unwrap().clone();
+    let pending = st.pending_usage.lock().unwrap().clone();
+    let mut t = saved;
+    t.prompt_tokens += pending.prompt_tokens;
+    t.completion_tokens += pending.completion_tokens;
+    t.total_tokens += pending.total_tokens;
+    t.cache_hit_tokens = match (t.cache_hit_tokens, pending.cache_hit_tokens) {
+        (Some(a), Some(b)) => Some(a + b),
+        (a, b) => a.or(b),
+    };
+    t.cache_miss_tokens = match (t.cache_miss_tokens, pending.cache_miss_tokens) {
+        (Some(a), Some(b)) => Some(a + b),
+        (a, b) => a.or(b),
+    };
+    t
 }
 
 pub async fn serve(app: Arc<App>, port: u16) -> anyhow::Result<()> {
     let contest_dir = app.contest_dir();
 
-    // 加载上次 session
-    let (messages, current_session) = match &contest_dir {
+    // 加载上次 session（含持久化的 Token 用量基线）
+    let (messages, current_session, saved_usage) = match &contest_dir {
         Some(c) => {
             let mut msgs = Vec::new();
             let mut sess = None;
+            let mut usage = session_mod::TokenUsage::default();
             if let Ok(Some(s)) = session_mod::last(c) {
                 let n = s.name.clone();
                 msgs = s.messages;
+                usage = s.usage;
                 if msgs.is_empty() || msgs[0].role != "system" {
                     msgs.insert(0, agent::system_message_for(Role::Supervisor, &app));
                 }
@@ -51,11 +76,12 @@ pub async fn serve(app: Arc<App>, port: u16) -> anyhow::Result<()> {
             } else {
                 msgs.push(agent::system_message_for(Role::Supervisor, &app));
             }
-            (msgs, sess)
+            (msgs, sess, usage)
         }
         None => (
             vec![agent::system_message_for(Role::Supervisor, &app)],
             None,
+            session_mod::TokenUsage::default(),
         ),
     };
 
@@ -64,6 +90,8 @@ pub async fn serve(app: Arc<App>, port: u16) -> anyhow::Result<()> {
         messages: Arc::new(Mutex::new(messages)),
         current_session: Arc::new(Mutex::new(current_session)),
         cancel: CancelFlag::new(),
+        pending_usage: Arc::new(std::sync::Mutex::new(session_mod::TokenUsage::default())),
+        saved_usage: Arc::new(std::sync::Mutex::new(saved_usage)),
     });
 
     let app_router = Router::new()
@@ -296,6 +324,7 @@ async fn new_session(
         updated_at: chrono::Utc::now(),
         messages: vec![agent::system_message_for(Role::Supervisor, &st.app)],
         children: vec![],
+        usage: Default::default(),
     };
     let _ = session_mod::save(d, &s);
     *st.messages.lock().await = s.messages.clone();
@@ -344,7 +373,16 @@ async fn switch_session(
             })).collect();
             *st.messages.lock().await = msgs;
             *st.current_session.lock().await = Some(req.name.clone());
-            Json(json!({ "ok": true, "name": req.name, "messages": messages_json, "children": children_json }))
+            // 切换 session：用量基线切换为新 session 的持久化用量，清空 pending
+            let usage_json = json!({
+                "prompt_tokens": s.usage.prompt_tokens,
+                "completion_tokens": s.usage.completion_tokens,
+                "total_tokens": s.usage.total_tokens,
+                "cache_hit_tokens": s.usage.cache_hit_tokens,
+            });
+            *st.saved_usage.lock().unwrap() = s.usage.clone();
+            *st.pending_usage.lock().unwrap() = Default::default();
+            Json(json!({ "ok": true, "name": req.name, "messages": messages_json, "children": children_json, "usage": usage_json }))
         }
         Err(e) => Json(json!({ "error": format!("{e:#}") })),
     }
@@ -415,12 +453,37 @@ async fn handle_ws(mut socket: WebSocket, st: Arc<ServerState>) {
     let tx_agent = tx_out.clone();
     let st_agent = st.clone();
 
+    // 连接建立即推送当前累计用量（状态栏初始显示）
+    {
+        let total = total_usage(&st);
+        let _ = tx_out.send(
+            json!({
+                "type": "usage",
+                "usage": {
+                    "prompt_tokens": total.prompt_tokens,
+                    "completion_tokens": total.completion_tokens,
+                    "total_tokens": total.total_tokens,
+                    "cache_hit_tokens": total.cache_hit_tokens,
+                },
+            })
+            .to_string(),
+        );
+    }
+
     // Agent 处理 task：从 channel 接收 chat 消息，运行 agent
     let (tx_chat, mut rx_chat) = mpsc::unbounded_channel::<String>();
     let agent_task = tokio::spawn(async move {
         while let Some(user_text) = rx_chat.recv().await {
+            // 新回合：重置上一回合的中断标志
+            st_agent.cancel.reset();
             crate::term::set_ws_sender(Some(tx_agent.as_ref().clone()));
-            // 确保 session 存在，不存在则自动创建
+            // 先写入用户消息
+            {
+                let mut msgs = st_agent.messages.lock().await;
+                msgs[0] = agent::system_message_for(Role::Supervisor, &st_agent.app);
+                msgs.push(ChatMessage::user(user_text));
+            }
+            // 确保 session 存在（第一条消息时创建，文件内含该消息），不存在则自动创建
             {
                 let sess = st_agent.current_session.lock().await;
                 if sess.is_none() {
@@ -429,12 +492,14 @@ async fn handle_ws(mut socket: WebSocket, st: Arc<ServerState>) {
                     if sess.is_none()
                         && let Some(cdir) = st_agent.app.contest_dir()
                             && let Ok(name) = session_mod::auto_name(&cdir) {
+                                let msgs = st_agent.messages.lock().await.clone();
                                 let s = session_mod::Session {
                                     name: name.clone(),
                                     created_at: chrono::Utc::now(),
                                     updated_at: chrono::Utc::now(),
-                                    messages: vec![agent::system_message_for(Role::Supervisor, &st_agent.app)],
+                                    messages: msgs,
                                     children: vec![],
+                                    usage: Default::default(),
                                 };
                                 let _ = session_mod::save(&cdir, &s);
                                 *sess = Some(name.clone());
@@ -445,12 +510,19 @@ async fn handle_ws(mut socket: WebSocket, st: Arc<ServerState>) {
                             }
                 }
             }
-            {
-                let mut msgs = st_agent.messages.lock().await;
-                msgs[0] = agent::system_message_for(Role::Supervisor, &st_agent.app);
-                msgs.push(ChatMessage::user(user_text));
-            }
             let deps = st_agent.app.deps();
+            // 增量保存：工具调用等每步变化都落盘
+            let (save_tx, mut save_rx) = mpsc::unbounded_channel::<Vec<ChatMessage>>();
+            let saver = st_agent.current_session.lock().await.clone().map(|name| {
+                let app2 = st_agent.app.clone();
+                tokio::spawn(async move {
+                    while let Some(msgs) = save_rx.recv().await {
+                        if let Some(d) = app2.contest_dir() {
+                            let _ = session_mod::save_messages(&d, &name, &msgs, &session_mod::TokenUsage::default());
+                        }
+                    }
+                })
+            });
             let result = {
                 let mut msgs = st_agent.messages.lock().await;
                 agent::run_turn(
@@ -462,22 +534,44 @@ async fn handle_ws(mut socket: WebSocket, st: Arc<ServerState>) {
                     true,
                     true,
                     &st_agent.cancel,
+                    Some(&save_tx),
                 )
                 .await
             };
+            drop(save_tx);
+            if let Some(s) = saver {
+                let _ = s.await;
+            }
             crate::term::set_ws_sender(None);
 
             match result {
                 Ok(turn_result) => {
+                    // 累计到 pending，待保存时持久化
+                    if let Some(u) = &turn_result.usage {
+                        let mut pending = st_agent.pending_usage.lock().unwrap();
+                        pending.prompt_tokens += u.prompt_tokens;
+                        pending.completion_tokens += u.completion_tokens;
+                        pending.total_tokens += u.total_tokens;
+                        pending.cache_hit_tokens = match (pending.cache_hit_tokens, u.cache_hit_tokens) {
+                            (Some(a), Some(b)) => Some(a + b),
+                            (a, b) => a.or(b),
+                        };
+                        pending.cache_miss_tokens = match (pending.cache_miss_tokens, u.cache_miss_tokens) {
+                            (Some(a), Some(b)) => Some(a + b),
+                            (a, b) => a.or(b),
+                        };
+                    }
+                    let total = total_usage(&st_agent);
                     let _ = tx_agent.send(
                         json!({
                             "type": "done",
                             "interrupted": turn_result.interrupted,
-                            "usage": turn_result.usage.as_ref().map(|u| json!({
-                                "prompt_tokens": u.prompt_tokens,
-                                "completion_tokens": u.completion_tokens,
-                                "cache_hit_tokens": u.cache_hit_tokens,
-                            })),
+                            "usage": {
+                                "prompt_tokens": total.prompt_tokens,
+                                "completion_tokens": total.completion_tokens,
+                                "total_tokens": total.total_tokens,
+                                "cache_hit_tokens": total.cache_hit_tokens,
+                            },
                         })
                         .to_string(),
                     );
@@ -489,6 +583,20 @@ async fn handle_ws(mut socket: WebSocket, st: Arc<ServerState>) {
                 }
             }
             save_session(&st_agent).await;
+            // 保存后发送一次总用量（状态栏刷新为持久化后的值）
+            let total = total_usage(&st_agent);
+            let _ = tx_agent.send(
+                json!({
+                    "type": "usage",
+                    "usage": {
+                        "prompt_tokens": total.prompt_tokens,
+                        "completion_tokens": total.completion_tokens,
+                        "total_tokens": total.total_tokens,
+                        "cache_hit_tokens": total.cache_hit_tokens,
+                    },
+                })
+                .to_string(),
+            );
             // 发送消息列表更新（含子 session 引用）
             let msgs = st_agent.messages.lock().await;
             let session_name = st_agent.current_session.lock().await.clone();
@@ -527,6 +635,53 @@ async fn handle_ws(mut socket: WebSocket, st: Arc<ServerState>) {
                                 Some("stop") => {
                                     st.cancel.cancel();
                                 }
+                                Some("ask_answer") => {
+                                    // 问卷提交/取消：转发给等待中的 ask_user 工具
+                                    st.app.send_ask_answer(req.clone());
+                                }
+                                Some("undo") | Some("redo") => {
+                                    let is_undo = req["type"] == "undo";
+                                    let cur_len = st.messages.lock().await.len();
+                                    let result = if is_undo {
+                                        st.app.snapshot_undo(cur_len)
+                                    } else {
+                                        st.app.snapshot_redo(cur_len)
+                                    };
+                                    let msg = match result {
+                                        Ok(Some(point)) => {
+                                            // 对话同步回退/恢复
+                                            st.messages.lock().await.truncate(point.msg_len);
+                                            // 持久化截断后的对话
+                                            save_session(&st).await;
+                                            format!(
+                                                "已{}到快照 {}（对话已同步{}到 {} 条消息）",
+                                                if is_undo { "回滚" } else { "重做" },
+                                                &point.hash[..8.min(point.hash.len())],
+                                                if is_undo { "回退" } else { "恢复" },
+                                                point.msg_len
+                                            )
+                                        }
+                                        Ok(None) => {
+                                            if is_undo { "没有可回滚的快照" } else { "没有可重做的快照" }.to_string()
+                                        }
+                                        Err(e) => format!("{}失败：{e:#}", if is_undo { "回滚" } else { "重做" }),
+                                    };
+                                    let _ = tx_out.send(
+                                        json!({ "type": "tool_result", "text": msg }).to_string(),
+                                    );
+                                    // 快照变化后刷新题目区 + 全量消息刷新
+                                    let _ = tx_out.send(
+                                        json!({ "type": "snapshot_done" }).to_string(),
+                                    );
+                                    let msgs = st.messages.lock().await;
+                                    let messages_json: Vec<Value> = msgs
+                                        .iter()
+                                        .map(|m| json!({"role": m.role, "content": m.content, "tool_calls": m.tool_calls}))
+                                        .collect();
+                                    let _ = tx_out.send(
+                                        json!({ "type": "messages", "messages": messages_json }).to_string(),
+                                    );
+                                }
                                 _ => {}
                             }
                         }
@@ -564,7 +719,14 @@ async fn save_session(st: &ServerState) {
             Err(_) => return,
         },
     };
-    let _ = session_mod::save_messages(d, &name, &msgs);
+    // 取出本回合待保存用量，持久化后清零 pending
+    let add_usage = {
+        let mut pending = st.pending_usage.lock().unwrap();
+        std::mem::take(&mut *pending)
+    };
+    if session_mod::save_messages(d, &name, &msgs, &add_usage).is_ok() {
+        *st.saved_usage.lock().unwrap() = total_usage(st);
+    }
 }
 
 // ---------------------------------------------------------------------------

@@ -5,12 +5,15 @@ import { MenuBar, StatusBar } from './components/Layout';
 import { ProblemArea } from './components/ProblemArea';
 import { ChatArea } from './components/ChatArea';
 import { SessionBar } from './components/SessionBar';
+import { Questionnaire } from './components/Questionnaire';
+import type { AskQuestion, AskAnswer } from './components/Questionnaire';
 import type { WsMessage } from './api';
 
 interface DisplayMessage {
   role: string;
   content: string;
   toolCalls?: string;
+  agent?: string;
 }
 
 interface ChildSession {
@@ -29,9 +32,11 @@ export default function App() {
   const [children, setChildren] = useState<ChildSession[]>([]);
   const [streaming, setStreaming] = useState(false);
   const [usage, setUsage] = useState<any>(null);
+  const [askQuestions, setAskQuestions] = useState<AskQuestion[] | null>(null);
   const [leftWidth, setLeftWidth] = useState(45);
   const wsRef = useRef<WebSocket | null>(null);
   const currentMsgRef = useRef<DisplayMessage | null>(null);
+  const currentAgentRef = useRef<string>('supervisor');
   const sessionNameRef = useRef<string | null>(null);
   const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const pendingFlushRef = useRef(false);
@@ -75,9 +80,10 @@ export default function App() {
         toolCalls: m.tool_calls?.map((tc: any) => `[${tc.function.name}(${tc.function.arguments})]`).join('\n'),
       }));
 
-  const handleMessagesLoaded = (raw: any[], rawChildren: any[]) => {
+  const handleMessagesLoaded = (raw: any[], rawChildren: any[], rawUsage?: any) => {
     setMessages(messagesToDisplay(raw));
     setChildren(rawChildren ?? []);
+    if (rawUsage) setUsage(rawUsage);
   };
 
   // 仅刷新 session 列表（轮询用，不动消息）
@@ -88,7 +94,7 @@ export default function App() {
     sessionNameRef.current = d.current;
   }, []);
 
-  // 初始加载：session 列表 + 当前会话历史消息
+  // 初始加载：session 列表 + 当前会话历史消息（含持久化用量）
   const loadSessions = useCallback(async () => {
     const d = await getSessions();
     setSessions(d.sessions);
@@ -99,7 +105,11 @@ export default function App() {
       if (r.ok && r.messages) {
         setMessages(messagesToDisplay(r.messages));
         setChildren(r.children ?? []);
+        if (r.usage) setUsage(r.usage);
+        else setUsage({ prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 });
       }
+    } else {
+      setUsage({ prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 });
     }
   }, []);
 
@@ -127,26 +137,35 @@ export default function App() {
   const handleWsMessage = (msg: WsMessage) => {
     if (msg.type === 'content') {
       if (!currentMsgRef.current || currentMsgRef.current.role !== 'assistant') {
-        currentMsgRef.current = { role: 'assistant', content: '' };
+        currentMsgRef.current = { role: 'assistant', content: '', agent: currentAgentRef.current };
         setMessages(m => [...m, currentMsgRef.current!]);
       }
       currentMsgRef.current.content += msg.text;
       scheduleFlush();
     } else if (msg.type === 'reasoning') {
       if (!currentMsgRef.current || currentMsgRef.current.role !== 'reasoning') {
-        currentMsgRef.current = { role: 'reasoning', content: '' };
+        currentMsgRef.current = { role: 'reasoning', content: '', agent: currentAgentRef.current };
         setMessages(m => [...m, currentMsgRef.current!]);
       }
       currentMsgRef.current.content += msg.text;
       scheduleFlush();
     } else if (msg.type === 'tool_call') {
       const { name, args } = msg as any;
+      currentMsgRef.current = null;
       setMessages(m => [...m, { role: 'tool', content: `工具调用：${name}(${JSON.stringify(args, null, 2)})` }]);
     } else if (msg.type === 'tool_result') {
+      currentMsgRef.current = null;
       setMessages(m => [...m, { role: 'tool', content: (msg as any).text }]);
     } else if (msg.type === 'step_boundary') {
+      currentAgentRef.current = (msg as any).agent || 'supervisor';
       currentMsgRef.current = null;
       flushNow();
+    } else if (msg.type === 'ask_user') {
+      setAskQuestions((msg as any).questions);
+    } else if (msg.type === 'snapshot_done') {
+      // 快照回滚/重做后刷新题目区（文件可能已变化）
+      loadProblem();
+      loadContest();
     } else if (msg.type === 'usage') {
       setUsage((msg as any).usage);
     } else if (msg.type === 'log') {
@@ -154,6 +173,7 @@ export default function App() {
     } else if (msg.type === 'done' || msg.type === 'error') {
       setStreaming(false);
       currentMsgRef.current = null;
+      setAskQuestions(null);
       flushNow();
       if (msg.type === 'error') {
         setMessages(m => [...m, { role: 'system', content: '错误：' + msg.message }]);
@@ -182,7 +202,21 @@ export default function App() {
     wsRef.current?.send(JSON.stringify({ type: 'chat', text }));
   };
 
-  const handleStop = () => wsRef.current?.send(JSON.stringify({ type: 'stop' }));
+  const handleStop = () => {
+    // 中止对话同时作废问卷
+    if (askQuestions) setAskQuestions(null);
+    wsRef.current?.send(JSON.stringify({ type: 'stop' }));
+  };
+
+  const handleAskSubmit = (answers: AskAnswer[]) => {
+    setAskQuestions(null);
+    wsRef.current?.send(JSON.stringify({ type: 'ask_answer', answers }));
+  };
+
+  const handleAskCancel = () => {
+    setAskQuestions(null);
+    wsRef.current?.send(JSON.stringify({ type: 'ask_answer', cancelled: true }));
+  };
 
   const handleSplitterMouseDown = (e: React.MouseEvent) => {
     e.preventDefault();
@@ -220,12 +254,22 @@ export default function App() {
           <SessionBar sessions={sessions} current={currentSession} onSwitched={refreshSessionList} onMessagesLoaded={handleMessagesLoaded} />
           <ChatArea
             messages={messages}
-            children={children}
+            childSessions={children}
             sessionName={currentSession}
             streaming={streaming}
             onSend={handleSend}
             onStop={handleStop}
-          />
+            onUndo={() => wsRef.current?.send(JSON.stringify({ type: 'undo' }))}
+            onRedo={() => wsRef.current?.send(JSON.stringify({ type: 'redo' }))}
+          >
+            {askQuestions && (
+              <Questionnaire
+                questions={askQuestions}
+                onSubmit={handleAskSubmit}
+                onCancel={handleAskCancel}
+              />
+            )}
+          </ChatArea>
         </div>
       </div>
       <StatusBar path={contest?.contest_dir ?? '无比赛工程'} usage={usage} />

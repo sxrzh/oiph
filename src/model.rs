@@ -54,25 +54,6 @@ impl ProblemSource {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-#[derive(Default)]
-pub enum DataType {
-    Blob,
-    #[default]
-    Generated,
-}
-
-
-impl DataType {
-    pub fn label(&self) -> &'static str {
-        match self {
-            Self::Blob => "现成数据",
-            Self::Generated => "生成数据",
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "UPPERCASE")]
 pub enum Verdict {
     Ac,
@@ -305,8 +286,6 @@ pub struct SolutionStatus {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DataStatus {
     #[serde(default)]
-    pub data_type: DataType,
-    #[serde(default)]
     pub status: ComponentStatus,
 }
 
@@ -445,7 +424,6 @@ impl Problem {
     }
     fn def_data() -> DataStatus {
         DataStatus {
-            data_type: DataType::Generated,
             status: ComponentStatus::NotStarted,
         }
     }

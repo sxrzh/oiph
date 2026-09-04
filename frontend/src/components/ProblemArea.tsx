@@ -1,6 +1,7 @@
 import { useState } from 'react';
 import type { ProblemDetail } from '../types';
 import { StatusCell } from './Status';
+import { swAlert } from './sw';
 import { Spoiler } from './Spoiler';
 import { MarkdownEditor } from './MarkdownEditor';
 import { FileEditor } from './FileEditor';
@@ -27,7 +28,7 @@ export function ProblemArea({
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
           <h3 style={{ flex: 1 }}>{problem.name || problem.id}</h3>
           <button className="btn" onClick={() => { onRefresh(); }}>刷新</button>
-          <button className="btn" onClick={() => fetch('/api/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ problem: problem.id }) }).then(r => r.json()).then(d => alert(d.reports?.map((r: any) => r.log.join('\n')).join('\n\n') || JSON.stringify(d)))}>单题自测</button>
+          <button className="btn" onClick={() => fetch('/api/test', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ problem: problem.id }) }).then(r => r.json()).then(d => swAlert('集成测试结果', d.reports?.map((r: any) => r.log.join('\n')).join('\n\n') || JSON.stringify(d)))}>单题自测</button>
         </div>
       </div>
       <div className="detail-tabs">
@@ -109,13 +110,17 @@ function DataTab({ problem }: { problem: ProblemDetail }) {
         <Spoiler key={i} title={`Subtask ${i + 1}（${st.score} 分，${st.type}）${st.sample ? ' [样例]' : ''}${st.depend.length ? ` 依赖: ${st.depend.join(', ')}` : ''}`}>
           <table>
             <thead>
-              <tr><th>测试点</th><th>{Object.keys(problem.data_gen).length > 0 ? 'generator 参数' : '输入文件'}</th></tr>
+              <tr><th>测试点</th><th>数据来源</th></tr>
             </thead>
             <tbody>
               {st.cases.map(c => (
                 <tr key={c}>
                   <td>{c}</td>
-                  <td>{problem.data_gen[c] ? problem.data_gen[c] : `${c}.in`}</td>
+                  <td>
+                    {problem.data_gen[c] !== undefined
+                      ? <span>generator <code>{problem.data_gen[c]}</code></span>
+                      : <span><code>{c}.in</code>{' / '}<code>{c}.ans</code></span>}
+                  </td>
                 </tr>
               ))}
             </tbody>

@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 use anyhow::Result;
+use serde_json::Value;
+use tokio::sync::mpsc::UnboundedSender;
 
 use crate::agent::AgentDeps;
 use crate::client::Client;
@@ -27,6 +29,12 @@ pub struct App {
     prompts: Mutex<AgentPrompts>,
     /// per-agent 客户端（agents.json 中配置了 base_url/api_key 的 agent）。
     agent_clients: Mutex<HashMap<String, Client>>,
+    /// 工作区快照：undo 栈（每步工具执行前的 tree hash + 对话消息数）。
+    undo_stack: Mutex<Vec<crate::snapshot::SnapshotPoint>>,
+    /// 工作区快照：redo 栈（undo 时保存的当前状态）。
+    redo_stack: Mutex<Vec<crate::snapshot::SnapshotPoint>>,
+    /// ask_user 问卷的答案回传通道（工具等待用户提交）。
+    ask_answer: Mutex<Option<UnboundedSender<Value>>>,
 }
 
 impl App {
@@ -52,7 +60,90 @@ impl App {
             client,
             prompts: Mutex::new(AgentPrompts::default()),
             agent_clients: Mutex::new(HashMap::new()),
+            undo_stack: Mutex::new(Vec::new()),
+            redo_stack: Mutex::new(Vec::new()),
+            ask_answer: Mutex::new(None),
         })
+    }
+
+    /// 注册问卷答案接收端（ask_user 工具调用前），返回旧值。
+    pub fn register_ask_answer(&self, tx: UnboundedSender<Value>) {
+        if let Ok(mut g) = self.ask_answer.lock() {
+            *g = Some(tx);
+        }
+    }
+
+    /// 取下问卷答案接收端（工具结束时）。
+    pub fn take_ask_answer(&self) {
+        if let Ok(mut g) = self.ask_answer.lock() {
+            *g = None;
+        }
+    }
+
+    /// 前端提交问卷答案 / 取消。返回是否有接收端。
+    pub fn send_ask_answer(&self, value: Value) -> bool {
+        self.ask_answer
+            .lock()
+            .ok()
+            .and_then(|g| g.as_ref().map(|tx| tx.send(value).is_ok()))
+            .unwrap_or(false)
+    }
+
+    /// 当前 session 的快照仓库（无比赛/无 session 时 None）。
+    fn snapshot_store(&self) -> Option<crate::snapshot::SnapshotStore> {
+        let cdir = self.contest_dir()?;
+        let sess = crate::session::current_name(&cdir)?;
+        Some(crate::snapshot::SnapshotStore::new(
+            &crate::session::sessions_dir(&cdir).join(sess),
+            &cdir,
+        ))
+    }
+
+    /// 工具执行前捕获工作区快照（新操作清空 redo 栈）。
+    /// 同时在对话区显示快照信息。
+    pub fn snapshot_capture(&self, msg_len: usize) {
+        let Some(store) = self.snapshot_store() else { return };
+        if let Ok(h) = store.capture() {
+            if let Ok(mut u) = self.undo_stack.lock() {
+                u.push(crate::snapshot::SnapshotPoint { hash: h.clone(), msg_len });
+            }
+            if let Ok(mut r) = self.redo_stack.lock() {
+                r.clear();
+            }
+            // 对话区显示（GUI 走 tool_result 消息；CLI 打印到终端）
+            let short = &h[..8.min(h.len())];
+            crate::term::send_tool_result(&format!("已建立快照 {short}"));
+            crate::term::println_err(&format!("已建立快照 {short}"));
+        }
+    }
+
+    /// 回滚到上一个快照（同时回退对话）。
+    /// 返回应恢复到的快照点（调用方把消息截断到 `point.msg_len`）。
+    pub fn snapshot_undo(&self, current_msg_len: usize) -> Result<Option<crate::snapshot::SnapshotPoint>> {
+        let Some(store) = self.snapshot_store() else { return Ok(None) };
+        let point = self.undo_stack.lock().ok().and_then(|mut u| u.pop());
+        let Some(point) = point else { return Ok(None) };
+        // 当前状态压入 redo
+        if let Ok(cur) = store.capture()
+            && let Ok(mut r) = self.redo_stack.lock() {
+                r.push(crate::snapshot::SnapshotPoint { hash: cur, msg_len: current_msg_len });
+            }
+        store.restore(&point.hash)?;
+        Ok(Some(point))
+    }
+
+    /// 重做：恢复 undo 前的状态（同时恢复对话）。
+    /// 返回应恢复到的快照点。
+    pub fn snapshot_redo(&self, current_msg_len: usize) -> Result<Option<crate::snapshot::SnapshotPoint>> {
+        let Some(store) = self.snapshot_store() else { return Ok(None) };
+        let point = self.redo_stack.lock().ok().and_then(|mut r| r.pop());
+        let Some(point) = point else { return Ok(None) };
+        if let Ok(cur) = store.capture()
+            && let Ok(mut u) = self.undo_stack.lock() {
+                u.push(crate::snapshot::SnapshotPoint { hash: cur, msg_len: current_msg_len });
+            }
+        store.restore(&point.hash)?;
+        Ok(Some(point))
     }
 
     /// 设置 agent 提示词与 per-agent 客户端（启动时从配置加载）。

@@ -13,7 +13,7 @@ use chrono::{Datelike, FixedOffset, Timelike, Utc};
 use crate::client::ChatUsage;
 
 /// 单价配置（元或美元 / M token）。
-#[derive(Debug, Clone, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PriceConfig {
     /// 输入价格/M token（缓存未命中）
     pub input: f64,
@@ -27,7 +27,16 @@ pub struct PriceConfig {
 }
 
 fn default_currency() -> String {
-    "￥".into()
+    "CNY".into()
+}
+
+/// 规范化货币代码：兼容旧配置中的符号（￥→CNY、$→USD），其余转大写。
+pub fn normalize_currency(c: &str) -> String {
+    match c.trim() {
+        "￥" | "¥" | "RMB" | "rmb" => "CNY".into(),
+        "$" | "usd" | "Usd" => "USD".into(),
+        other => other.trim().to_uppercase(),
+    }
 }
 
 /// 费用估算结果。
@@ -122,7 +131,7 @@ impl Pricing {
                     .unwrap_or(usage.prompt_tokens.saturating_sub(usage.cache_hit_tokens.unwrap_or(0)))
                     as f64;
                 let amount = (miss * p.input + hit * p.hit + usage.completion_tokens as f64 * p.output) / 1e6;
-                Some(Cost { currency: p.currency.clone(), amount })
+                Some(Cost { currency: normalize_currency(&p.currency), amount })
             }
             Pricing::DeepSeek => {
                 let r = deepseek_rates(model);
@@ -134,7 +143,7 @@ impl Pricing {
                     as f64;
                 let amount =
                     (miss * r.miss + hit * r.hit + usage.completion_tokens as f64 * r.output) * factor / 1e6;
-                Some(Cost { currency: "￥".into(), amount })
+                Some(Cost { currency: "CNY".into(), amount })
             }
         }
     }
@@ -215,7 +224,7 @@ mod tests {
         let c = p.estimate(&usage, "m").unwrap();
         // miss 600k*2 + hit 400k*0.2 + out 500k*8 = 1200 + 80 + 4000 = 5280 / 1e6*1e6
         assert!((c.amount - 5.28).abs() < 1e-9);
-        assert_eq!(c.currency, "$");
+        assert_eq!(c.currency, "USD");
     }
 
     #[test]
@@ -223,5 +232,15 @@ mod tests {
         assert!(matches!(auto("https://api.deepseek.com/v1"), Pricing::DeepSeek));
         assert!(matches!(auto("https://open.bigmodel.cn/api/paas/v4"), Pricing::None));
         assert!(matches!(auto("https://api.openai.com/v1"), Pricing::None));
+    }
+
+    #[test]
+    fn normalize_currency_codes() {
+        assert_eq!(normalize_currency("￥"), "CNY");
+        assert_eq!(normalize_currency("¥"), "CNY");
+        assert_eq!(normalize_currency("$"), "USD");
+        assert_eq!(normalize_currency("cny"), "CNY");
+        assert_eq!(normalize_currency("USD"), "USD");
+        assert_eq!(normalize_currency("EUR"), "EUR");
     }
 }

@@ -162,9 +162,8 @@ LemonLime 导出内容包括：
 
 ## 未实现（桩）
 
-- Polygon API
-- tuack 和 tuack-ng 格式导出
-- 其他 OJ 格式导出（SYZOJ 等）
+- 数据 / std / 解法检查 `check_data` / `check_std` / `check_solutions`：统一返回通过（后续接入 tuack-ng）
+- Web UI、Polygon API、其他 OJ 格式导出（SYZOJ/HydroOJ 等）
 
 ## 查重（原题查找）
 

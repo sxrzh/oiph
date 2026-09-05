@@ -383,3 +383,90 @@ textarea.editor {
 .md-body ul, .md-body ol { margin: 4px 0 4px 20px; }
 .md-body table { margin: 6px 0; }
 .md-body h1, .md-body h2, .md-body h3 { margin: 8px 0 4px; font-size: 14px; }
+
+/* 设置页（三栏） */
+.settings-layout {
+  display: grid;
+  grid-template-columns: 1fr 1fr 1fr;
+  gap: 12px;
+  padding: 12px;
+  height: 100vh;
+  box-sizing: border-box;
+  overflow: hidden;
+}
+.settings-pane {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+  background: var(--bg-tab, #16202e);
+  border: 1px solid var(--border, #2a3a50);
+  border-radius: 6px;
+  padding: 10px;
+}
+.settings-pane h2 { margin: 0 0 6px; font-size: 15px; }
+.settings-pane h3 { margin: 8px 0 4px; font-size: 13px; }
+.settings-pane .hint { font-size: 12px; color: var(--fg-muted, #8aa); margin: 2px 0 8px; }
+.settings-card {
+  border: 1px solid var(--border, #2a3a50);
+  border-radius: 4px;
+  padding: 8px;
+  margin-bottom: 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.settings-card label, .settings-pane > label { font-size: 12px; color: var(--fg-muted, #8aa); }
+.settings-card input, .settings-card select {
+  background: #0d1622;
+  color: var(--fg, #dde);
+  border: 1px solid var(--border, #2a3a50);
+  border-radius: 4px;
+  padding: 4px 6px;
+  font-size: 12px;
+}
+.settings-card .row { display: flex; gap: 8px; }
+.settings-card .row > div { flex: 1; display: flex; flex-direction: column; gap: 2px; }
+.settings-card .prices { align-items: flex-end; }
+.file-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 6px 0;
+  max-height: 35vh;
+  overflow-y: auto;
+}
+.file-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 6px;
+  border-radius: 4px;
+  font-size: 12px;
+}
+.file-item:hover, .file-item.active { background: #1e2a3a; }
+.file-item .file-name { flex: 1; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.file-item small { color: var(--fg-muted, #8aa); }
+.btn-danger { color: #f88; }
+.viewer { display: flex; flex-direction: column; min-height: 200px; flex: 1; }
+.code-viewer { flex: 1; min-height: 260px; display: flex; }
+
+/* 预算警告（菜单栏正中，持久显示） */
+.menubar { position: relative; }
+.budget-warning {
+  font-size: 12px;
+  font-weight: 700;
+  color: #ffd7d7;
+  background: linear-gradient(90deg, #b91c1c, #dc2626, #b91c1c);
+  background-size: 200% 100%;
+  animation: budgetPulse 1.6s linear infinite;
+  padding: 3px 14px;
+  border-radius: 999px;
+  box-shadow: 0 0 8px rgba(220, 38, 38, 0.7);
+  pointer-events: none;
+  white-space: nowrap;
+}
+@keyframes budgetPulse {
+  0% { background-position: 0% 50%; }
+  100% { background-position: 200% 50%; }
+}

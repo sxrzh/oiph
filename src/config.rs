@@ -52,7 +52,7 @@ pub fn agents_config_path() -> PathBuf {
     config_dir().join("agents.json")
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, Deserialize)]
 pub struct AgentConfig {
     #[serde(default)]
     pub base_url: Option<String>,
@@ -126,6 +126,15 @@ pub fn load_agents_config() -> Result<AgentsConfig> {
         }
     }
     Ok(cfg)
+}
+
+/// 保存 agents.json（设置界面用）。
+pub fn save_agents_config(cfg: &AgentsConfig) -> Result<()> {
+    let path = agents_config_path();
+    std::fs::create_dir_all(config_dir())?;
+    let json = serde_json::to_vec_pretty(cfg)?;
+    std::fs::write(&path, json).with_context(|| format!("写入 {}", path.display()))?;
+    Ok(())
 }
 
 /// 启动时加载的全部 agent 设置：提示词 + 每个 agent 的独立客户端 + 运行设置。

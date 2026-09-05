@@ -39,6 +39,8 @@ pub struct App {
     redo_stack: Mutex<Vec<crate::snapshot::SnapshotPoint>>,
     /// ask_user 问卷的答案回传通道（工具等待用户提交）。
     ask_answer: Mutex<Option<UnboundedSender<Value>>>,
+    /// API 费用预算（~/.oiph/config/limit.json；文件不存在时为 None，预算功能未启用）。
+    budget: Mutex<Option<crate::budget::BudgetFee>>,
 }
 
 impl App {
@@ -69,6 +71,7 @@ impl App {
             undo_stack: Mutex::new(Vec::new()),
             redo_stack: Mutex::new(Vec::new()),
             ask_answer: Mutex::new(None),
+            budget: Mutex::new(crate::budget::load()),
         })
     }
 
@@ -93,6 +96,66 @@ impl App {
             .ok()
             .and_then(|g| g.as_ref().map(|tx| tx.send(value).is_ok()))
             .unwrap_or(false)
+    }
+
+    // ---------------------------------------------------------------------------
+    // 费用预算
+    // ---------------------------------------------------------------------------
+
+    /// 累计一笔费用（amount 为 pricing_currency 计价），换算到预算货币后持久化。
+    /// 只增不减；预算未启用时忽略。
+    pub async fn budget_accumulate(&self, amount: f64, pricing_currency: &str) {
+        let Some(target_currency) = self.budget_snapshot().map(|b| b.3) else {
+            return;
+        };
+        let rate = crate::fx::exchange_rate(pricing_currency, &target_currency).await;
+        if let Ok(mut g) = self.budget.lock()
+            && let Some(b) = g.as_mut() {
+                b.used += amount * rate;
+                let _ = crate::budget::save(b);
+            }
+    }
+
+    /// 当前预算快照：(used, limit, warn, currency)。未启用返回 None。
+    pub fn budget_snapshot(&self) -> Option<(f64, f64, f64, String)> {
+        let g = self.budget.lock().ok()?;
+        let b = g.as_ref()?;
+        Some((b.used, b.limit, b.warn, b.currency()))
+    }
+
+    /// 设置/更新预算（保留 used），持久化并热生效。
+    pub fn budget_set(&self, limit: f64, used: Option<f64>, warn: f64, currency: &str) -> Result<()> {
+        let mut b = self
+            .budget
+            .lock()
+            .ok()
+            .and_then(|g| g.clone())
+            .unwrap_or(crate::budget::BudgetFee {
+                limit,
+                used: 0.0,
+                warn,
+                currency: currency.to_string(),
+            });
+        b.limit = limit;
+        b.warn = warn;
+        b.currency = currency.to_string();
+        if let Some(u) = used {
+            b.used = u;
+        }
+        crate::budget::save(&b)?;
+        if let Ok(mut g) = self.budget.lock() {
+            *g = Some(b);
+        }
+        Ok(())
+    }
+
+    /// 重置已用量（used = 0）。
+    pub fn budget_reset_used(&self) -> Result<()> {
+        let b = crate::budget::reset_used()?;
+        if let Ok(mut g) = self.budget.lock() {
+            *g = Some(b);
+        }
+        Ok(())
     }
 
     /// 当前 session 的快照仓库（无比赛/无 session 时 None）。

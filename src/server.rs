@@ -19,6 +19,7 @@ use tower_http::services::ServeDir;
 
 use crate::agent::{self, Role};
 use crate::client::{self as client_mod, Message as ChatMessage};
+use crate::config;
 use crate::project;
 use crate::session as session_mod;
 use crate::state::App;
@@ -68,12 +69,16 @@ fn usage_to_value(st: &ServerState, u: &session_mod::TokenUsage) -> Value {
         cache_miss_tokens: u.cache_miss_tokens,
     };
     let cost = pricing.estimate(&chat_usage, &st.app.model);
+    let budget = st.app.budget_snapshot().map(|(used, limit, warn, currency)| {
+        json!({ "used": used, "limit": limit, "warn": warn, "currency": currency, "over_warn": limit - used < warn })
+    });
     json!({
         "input": u.prompt_tokens,
         "output": u.completion_tokens,
         "total_tokens": u.total_tokens,
         "cache_hit_tokens": u.cache_hit_tokens,
         "cost": cost.map(|c| json!({ "currency": c.currency, "amount": c.amount })),
+        "budget": budget,
     })
 }
 
@@ -128,6 +133,16 @@ pub async fn serve(app: Arc<App>, port: u16) -> anyhow::Result<()> {
         .route("/api/test", post(run_test))
         .route("/api/kb/search", post(kb_search))
         .route("/api/skills", get(list_skills))
+        .route("/api/settings/agents", get(get_settings_agents).post(post_settings_agents))
+        .route("/api/settings/budget", get(get_settings_budget).post(post_settings_budget))
+        .route("/api/fee/reset", post(post_fee_reset))
+        .route("/api/kb/files", get(get_kb_files))
+        .route("/api/kb/file", get(get_kb_file))
+        .route("/api/kb/add", post(post_kb_add))
+        .route("/api/kb/delete", post(post_kb_delete))
+        .route("/api/skill/file", get(get_skill_file))
+        .route("/api/skill/add", post(post_skill_add))
+        .route("/api/skill/delete", post(post_skill_delete))
         .route("/ws", get(ws_handler))
         .fallback_service(ServeDir::new(concat!(env!("CARGO_MANIFEST_DIR"), "/frontend/dist")))
         .with_state(state);
@@ -839,9 +854,431 @@ async fn kb_search(
 
 async fn list_skills(State(st): State<Arc<ServerState>>) -> impl IntoResponse {
     let roots = st.app.skill_roots();
+    let global_root = crate::paths::global_skills_dir();
     let found = crate::skills::discover(&roots);
     let list: Vec<Value> = found.iter().map(|s| {
-        json!({ "name": s.name, "description": s.description })
+        let scope = if s.path.starts_with(&global_root) { "global" } else { "project" };
+        json!({ "name": s.name, "description": s.description, "scope": scope })
     }).collect();
     Json(json!({ "skills": list }))
+}
+
+// ---------------------------------------------------------------------------
+// 设置界面：API 配置（agents.json 读写 + 热更新）、知识库、Skills 管理
+// ---------------------------------------------------------------------------
+
+/// 名称合法性：禁止空、路径分隔符、`..`、空白。
+fn valid_name(name: &str) -> Result<(), String> {
+    if name.is_empty()
+        || name.contains('/')
+        || name.contains('\\')
+        || name.contains("..")
+        || name.contains(char::is_whitespace)
+    {
+        Err("名称不能为空、包含路径分隔符或空白字符".into())
+    } else {
+        Ok(())
+    }
+}
+
+/// 知识库来源标签合法性：标签是索引中的 key（内置来源含 '/'），仅需防止
+/// 路径穿越（".."、反斜杠、绝对路径）与空值。
+fn valid_label(name: &str) -> Result<(), String> {
+    if name.is_empty()
+        || name.contains("..")
+        || name.contains('\\')
+        || name.starts_with('/')
+    {
+        Err("名称不能为空或包含 '..'、'\\' 或以 '/' 开头".into())
+    } else {
+        Ok(())
+    }
+}
+
+/// 知识库目录：global / project。
+fn kb_dir_for(st: &ServerState, scope: &str) -> Result<std::path::PathBuf, String> {
+    match scope {
+        "global" => Ok(crate::paths::global_kb_dir()),
+        "project" => {
+            let d = st
+                .app
+                .contest_dir()
+                .ok_or_else(|| "无比赛工程，无法访问工程知识库".to_string())?;
+            Ok(crate::paths::project_kb_dir(&d))
+        }
+        other => Err(format!("未知 scope：{other}")),
+    }
+}
+
+/// skills 根目录：global / project。
+fn skill_root_for(st: &ServerState, scope: &str) -> Result<std::path::PathBuf, String> {
+    match scope {
+        "global" => Ok(crate::paths::global_skills_dir()),
+        "project" => {
+            let d = st
+                .app
+                .contest_dir()
+                .ok_or_else(|| "无比赛工程，无法访问工程 skills".to_string())?;
+            Ok(crate::paths::project_skills_dir(&d))
+        }
+        other => Err(format!("未知 scope：{other}")),
+    }
+}
+
+// ----- API 配置 -----
+
+async fn get_settings_agents(State(_st): State<Arc<ServerState>>) -> impl IntoResponse {
+    let Ok(cfg) = config::load_agents_config() else {
+        return Json(json!({ "error": "未找到 agents.json，请先运行 init.sh 初始化" }));
+    };
+    let mut agents: Vec<Value> = Vec::new();
+    let names: Vec<&str> = config::AGENTS.to_vec();
+    for name in names.into_iter().chain(std::iter::once(config::COMPACTOR)) {
+        let Some(ac) = cfg.get(name) else { continue };
+        let pricing = match &ac.price {
+            Some(p) => json!({ "mode": "manual", "input": p.input, "hit": p.hit, "output": p.output, "currency": p.currency }),
+            None => json!({ "mode": "auto", "input": null, "hit": null, "output": null, "currency": "CNY" }),
+        };
+        agents.push(json!({
+            "name": name,
+            "base_url": ac.base_url,
+            "api_key": ac.api_key,
+            "reasoning": ac.reasoning,
+            "max_context": ac.max_context,
+            "prompt": ac.prompt,
+            "pricing": pricing,
+        }));
+    }
+    Json(json!({ "agents": agents }))
+}
+
+#[derive(Deserialize)]
+struct PriceInput {
+    input: f64,
+    hit: f64,
+    output: f64,
+    #[serde(default)]
+    currency: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct AgentUiConf {
+    #[serde(default)]
+    base_url: Option<String>,
+    #[serde(default)]
+    api_key: Option<String>,
+    /// "default" | "on" | "off"
+    #[serde(default)]
+    reasoning: Option<String>,
+    #[serde(default)]
+    max_context: Option<u64>,
+    /// "auto" | "manual"
+    #[serde(default)]
+    pricing_mode: Option<String>,
+    #[serde(default)]
+    price: Option<PriceInput>,
+}
+
+#[derive(Deserialize)]
+struct SettingsAgentsReq {
+    agents: std::collections::BTreeMap<String, AgentUiConf>,
+}
+
+async fn post_settings_agents(
+    State(st): State<Arc<ServerState>>,
+    Json(req): Json<SettingsAgentsReq>,
+) -> impl IntoResponse {
+    let Ok(mut cfg) = config::load_agents_config() else {
+        return Json(json!({ "error": "未找到 agents.json，请先运行 init.sh 初始化" }));
+    };
+    for (name, conf) in &req.agents {
+        let Some(existing) = cfg.get(name).cloned() else {
+            return Json(json!({ "error": format!("未知 agent '{name}'") }));
+        };
+        let reasoning = match conf.reasoning.as_deref() {
+            Some("on") => Some(true),
+            Some("off") => Some(false),
+            _ => None,
+        };
+        let (price, policy) = match conf.pricing_mode.as_deref() {
+            Some("manual") => {
+                let Some(p) = &conf.price else {
+                    return Json(json!({ "error": format!("agent '{name}' 选择手动计价但缺少价格") }));
+                };
+                (
+                    Some(crate::pricing::PriceConfig {
+                        input: p.input,
+                        hit: p.hit,
+                        output: p.output,
+                        currency: p
+                            .currency
+                            .as_deref()
+                            .map(crate::pricing::normalize_currency)
+                            .unwrap_or_else(|| "CNY".into()),
+                    }),
+                    None,
+                )
+            }
+            _ => (None, Some("auto".to_string())),
+        };
+        cfg.insert(
+            name.clone(),
+            config::AgentConfig {
+                base_url: conf.base_url.clone().filter(|s| !s.trim().is_empty()),
+                api_key: conf.api_key.clone().filter(|s| !s.trim().is_empty()),
+                prompt: existing.prompt,
+                reasoning,
+                price,
+                price_policy: policy,
+                max_context: conf.max_context,
+            },
+        );
+    }
+    if let Err(e) = config::save_agents_config(&cfg) {
+        return Json(json!({ "error": format!("{e:#}") }));
+    }
+    // 热更新：重建 per-agent 客户端与设置并替换到 App（Token 用量统计不受影响）
+    match config::load_agent_setup(&cfg, &st.app.base_url, &st.app.api_key) {
+        Ok(setup) => {
+            st.app
+                .set_agent_setup(setup.prompts, setup.clients, setup.settings, setup.compactor_prompt);
+            Json(json!({ "ok": true }))
+        }
+        Err(e) => Json(json!({ "error": format!("配置已保存，但热更新失败（重启后生效）：{e:#}") })),
+    }
+}
+
+// ----- 费用预算 -----
+
+async fn get_settings_budget(State(st): State<Arc<ServerState>>) -> impl IntoResponse {
+    let budget = st.app.budget_snapshot().map(|(used, limit, warn, currency)| {
+        json!({ "used": used, "limit": limit, "warn": warn, "currency": currency })
+    });
+    Json(json!({ "budget": budget }))
+}
+
+#[derive(Deserialize)]
+struct BudgetSetReq {
+    limit: f64,
+    warn: f64,
+    currency: String,
+}
+
+async fn post_settings_budget(
+    State(st): State<Arc<ServerState>>,
+    Json(req): Json<BudgetSetReq>,
+) -> impl IntoResponse {
+    let currency = crate::pricing::normalize_currency(&req.currency);
+    match st.app.budget_set(req.limit, None, req.warn, &currency) {
+        Ok(_) => {
+            let (used, limit, warn, cur) = st.app.budget_snapshot().unwrap();
+            Json(json!({ "ok": true, "budget": { "used": used, "limit": limit, "warn": warn, "currency": cur } }))
+        }
+        Err(e) => Json(json!({ "error": format!("{e:#}") })),
+    }
+}
+
+async fn post_fee_reset(State(st): State<Arc<ServerState>>) -> impl IntoResponse {
+    match st.app.budget_reset_used() {
+        Ok(_) => {
+            let (used, limit, warn, currency) = st.app.budget_snapshot().unwrap();
+            Json(json!({ "ok": true, "budget": { "used": used, "limit": limit, "warn": warn, "currency": currency } }))
+        }
+        Err(e) => Json(json!({ "error": format!("{e:#}") })),
+    }
+}
+
+// ----- 知识库管理 -----
+
+async fn get_kb_files(State(st): State<Arc<ServerState>>) -> impl IntoResponse {
+    let mut files: Vec<Value> = Vec::new();
+    for scope in ["global", "project"] {
+        let Ok(dir) = kb_dir_for(&st, scope) else { continue };
+        let Ok(stats) = crate::kb::source_stats(&dir) else { continue };
+        for (source, chunks) in stats {
+            let has_source = dir.join(crate::kb::SOURCES_DIR).join(&source).is_file();
+            files.push(json!({
+                "scope": scope,
+                "name": source,
+                "chunks": chunks,
+                "has_source": has_source,
+            }));
+        }
+    }
+    Json(json!({ "files": files }))
+}
+
+#[derive(Deserialize)]
+struct KbFileQuery {
+    scope: String,
+    name: String,
+}
+
+async fn get_kb_file(
+    State(st): State<Arc<ServerState>>,
+    axum::extract::Query(q): axum::extract::Query<KbFileQuery>,
+) -> impl IntoResponse {
+    let Ok(dir) = kb_dir_for(&st, &q.scope) else {
+        return Json(json!({ "error": "无比赛工程，无法访问工程知识库" }));
+    };
+    if let Err(e) = valid_label(&q.name) {
+        return Json(json!({ "error": e }));
+    }
+    let content = crate::kb::read_source_file(&dir, &q.name)
+        .or_else(|| crate::kb::reconstruct_source(&dir, &q.name));
+    match content {
+        Some(c) => Json(json!({ "content": c })),
+        None => Json(json!({ "error": format!("未找到知识库文件 '{0}'（可能来自内置数据且无源文件副本）", q.name) })),
+    }
+}
+
+#[derive(Deserialize)]
+struct KbAddReq {
+    scope: String,
+    name: String,
+    content: String,
+}
+
+async fn post_kb_add(
+    State(st): State<Arc<ServerState>>,
+    Json(req): Json<KbAddReq>,
+) -> impl IntoResponse {
+    let Ok(dir) = kb_dir_for(&st, &req.scope) else {
+        return Json(json!({ "error": "无比赛工程，无法访问工程知识库" }));
+    };
+    if let Err(e) = valid_name(&req.name) {
+        return Json(json!({ "error": e }));
+    }
+    // 保存原文副本（查看全文用），再构建索引
+    if let Err(e) = crate::kb::save_source_file(&dir, &req.name, &req.content) {
+        return Json(json!({ "error": format!("{e:#}") }));
+    }
+    match crate::kb::add_document(
+        &dir,
+        &req.name,
+        &req.content,
+        &st.app.base_url,
+        &st.app.api_key,
+        st.app.embed_model.clone().as_deref(),
+    )
+    .await
+    {
+        Ok(n) => Json(json!({ "ok": true, "chunks": n })),
+        Err(e) => {
+            // 索引失败则回滚源文件副本，避免出现"有文件无索引"的悬空项
+            crate::kb::remove_source_file(&dir, &req.name);
+            Json(json!({ "error": format!("{e:#}") }))
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct KbDeleteReq {
+    scope: String,
+    name: String,
+}
+
+async fn post_kb_delete(
+    State(st): State<Arc<ServerState>>,
+    Json(req): Json<KbDeleteReq>,
+) -> impl IntoResponse {
+    let Ok(dir) = kb_dir_for(&st, &req.scope) else {
+        return Json(json!({ "error": "无比赛工程，无法访问工程知识库" }));
+    };
+    if let Err(e) = valid_label(&req.name) {
+        return Json(json!({ "error": e }));
+    }
+    match crate::kb::remove_source(&dir, &req.name) {
+        Ok(removed) => {
+            crate::kb::remove_source_file(&dir, &req.name);
+            Json(json!({ "ok": true, "removed_chunks": removed }))
+        }
+        Err(e) => Json(json!({ "error": format!("{e:#}") })),
+    }
+}
+
+// ----- Skills 管理 -----
+
+#[derive(Deserialize)]
+struct SkillFileQuery {
+    name: String,
+}
+
+async fn get_skill_file(
+    State(st): State<Arc<ServerState>>,
+    axum::extract::Query(q): axum::extract::Query<SkillFileQuery>,
+) -> impl IntoResponse {
+    if let Err(e) = valid_name(&q.name) {
+        return Json(json!({ "error": e }));
+    }
+    let global_root = crate::paths::global_skills_dir();
+    let project_root = st.app.contest_dir().map(|d| crate::paths::project_skills_dir(&d));
+    let mut roots: Vec<(std::path::PathBuf, &str)> = vec![(global_root, "global")];
+    if let Some(pr) = &project_root {
+        roots.push((pr.clone(), "project"));
+    }
+    for (root, scope) in roots.iter().rev() {
+        let f = root.join(&q.name).join("SKILL.md");
+        if f.is_file()
+            && let Ok(content) = std::fs::read_to_string(&f)
+        {
+            return Json(json!({ "name": q.name, "scope": scope, "content": content }));
+        }
+    }
+    Json(json!({ "error": format!("未找到 skill '{}' 的 SKILL.md", q.name) }))
+}
+
+#[derive(Deserialize)]
+struct SkillAddReq {
+    scope: String,
+    name: String,
+    content: String,
+}
+
+async fn post_skill_add(
+    State(st): State<Arc<ServerState>>,
+    Json(req): Json<SkillAddReq>,
+) -> impl IntoResponse {
+    let Ok(root) = skill_root_for(&st, &req.scope) else {
+        return Json(json!({ "error": "无比赛工程，无法访问工程 skills" }));
+    };
+    if let Err(e) = valid_name(&req.name) {
+        return Json(json!({ "error": e }));
+    }
+    let dir = root.join(&req.name);
+    if dir.exists() {
+        return Json(json!({ "error": format!("skill '{}' 已存在", req.name) }));
+    }
+    match std::fs::create_dir_all(&dir)
+        .and_then(|_| std::fs::write(dir.join("SKILL.md"), req.content.as_bytes()))
+    {
+        Ok(_) => Json(json!({ "ok": true, "path": dir.display().to_string() })),
+        Err(e) => Json(json!({ "error": format!("{e}") })),
+    }
+}
+
+#[derive(Deserialize)]
+struct SkillDeleteReq {
+    scope: String,
+    name: String,
+}
+
+async fn post_skill_delete(
+    State(st): State<Arc<ServerState>>,
+    Json(req): Json<SkillDeleteReq>,
+) -> impl IntoResponse {
+    let Ok(root) = skill_root_for(&st, &req.scope) else {
+        return Json(json!({ "error": "无比赛工程，无法访问工程 skills" }));
+    };
+    if let Err(e) = valid_name(&req.name) {
+        return Json(json!({ "error": e }));
+    }
+    let dir = root.join(&req.name);
+    if !dir.is_dir() {
+        return Json(json!({ "error": format!("skill '{}' 不存在", req.name) }));
+    }
+    match std::fs::remove_dir_all(&dir) {
+        Ok(_) => Json(json!({ "ok": true })),
+        Err(e) => Json(json!({ "error": format!("{e}") })),
+    }
 }

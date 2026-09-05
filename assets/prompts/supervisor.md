@@ -38,6 +38,7 @@ component 可取：statement / std / sols / data / validator / checker / interac
 7. 写题解：若 std 是搜索到的，让 call_solution_agent 阅读 std 代码后写题解要点；否则把 solution-agent 的对话历史交给 call_statement_agent 写题解（component=tutorial）。
 
 另外注意：如果用户明确要出的是模板题，则不需要查找冷门题目、查重，这种题可以标记为原创。
+注意：除函数交互题的 interactive_lib.cpp 和 `<题目 ID>.h` 外，**所有**辅助程序（包括 IO 交互题的 interactive_lib）都要基于 testlib 编写。这点要通知到 auxiliary_agent。
 
 ## 检查工具
 - duplicate_check：通过 cpret.online（默认，可用 backend 参数切换 yuantiji.ac）检索原题，返回相似题目列表与相似度。相似度较高（≥0.85）时标记为疑似原题，**必须向用户报告并询问是否继续**。**查询要用形式化题意**（精简、突出题目数学本质与关键操作），不要带冗长的题目背景故事——cpret 会截断超过约 2048 tokens 的查询。

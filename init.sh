@@ -135,7 +135,17 @@ else
     echo "警告：$ASSETS_DIR/auxiliary/testlib.h 或 $ASSETS_DIR/lemon/testlib.h 不存在" >&2
 fi
 
-# 6. 生成 agents.json（已存在则不动）
+# 6. 生成 limit.json（费用预算，已存在则不动）
+LIMIT_FILE="$CONFIG_DIR/limit.json"
+if [ ! -f "$LIMIT_FILE" ]; then
+    mkdir -p "$CONFIG_DIR"
+    printf '{ "limit_fee": { "limit": 100.0, "used": 0.0, "warn": 10.0, "currency": "CNY" } }\n' > "$LIMIT_FILE"
+    echo "✓ 生成 $LIMIT_FILE（费用预算 100 CNY，剩余低于 10 时告警）"
+else
+    echo "  limit.json 已存在，跳过"
+fi
+
+# 7. 生成 agents.json（已存在则不动）
 if [ ! -f "$CONFIG_DIR/agents.json" ]; then
     mkdir -p "$CONFIG_DIR"
     cat > "$CONFIG_DIR/agents.json" <<EOF

@@ -416,7 +416,12 @@ pub async fn run_turn(
             }
         };
 
-        // 累加 usage
+        // 累加 usage；同时按本次调用用量累计费用预算（换算到预算货币，只增不减）
+        if let Some(u) = &result.usage
+            && let Some(c) = settings.pricing.estimate(u, deps.model)
+        {
+            app.budget_accumulate(c.amount, &c.currency).await;
+        }
         if let Some(u) = &result.usage {
             total_usage = Some(match &mut total_usage {
                 Some(acc) => {
@@ -449,6 +454,9 @@ pub async fn run_turn(
                 });
                 if let Some(c) = &cost {
                     u["cost"] = serde_json::json!({ "currency": c.currency, "amount": c.amount });
+                }
+                if let Some((used, limit, warn, currency)) = app.budget_snapshot() {
+                    u["budget"] = serde_json::json!({ "used": used, "limit": limit, "warn": warn, "currency": currency });
                 }
                 term::send_usage_turn(&u.to_string());
             }
@@ -629,6 +637,11 @@ async fn compact_context(
         .await
         .context("上下文压缩失败")?;
     anyhow::ensure!(!result.interrupted, "上下文压缩被中止");
+    // 压缩调用也计入费用预算
+    if let Some(u) = &result.usage
+        && let Some(c) = compactor_settings.pricing.estimate(u, deps.model) {
+            app.budget_accumulate(c.amount, &c.currency).await;
+        }
     let summary = result.message.content.unwrap_or_default();
     anyhow::ensure!(!summary.trim().is_empty(), "compactor 返回空摘要");
 

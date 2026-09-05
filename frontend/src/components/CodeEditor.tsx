@@ -11,10 +11,12 @@ export function CodeEditor({
   value,
   onChange,
   language,
+  readOnly = false,
 }: {
   value: string;
   onChange: (v: string) => void;
   language: EditorLanguage;
+  readOnly?: boolean;
 }) {
   const extensions =
     language === 'markdown'
@@ -27,15 +29,17 @@ export function CodeEditor({
         height="100%"
         style={{ height: '100%' }}
         theme={oneDark}
+        editable={!readOnly}
         extensions={[
           ...extensions,
           EditorView.lineWrapping,
+          EditorView.editable.of(!readOnly),
         ]}
         onChange={onChange}
         basicSetup={{
           foldGutter: true,
-          highlightActiveLine: true,
-          autocompletion: true,
+          highlightActiveLine: !readOnly,
+          autocompletion: !readOnly,
         }}
       />
     </div>

@@ -328,6 +328,80 @@ pub fn cmd_clear(dir: &Path) -> Result<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------
+// 源文件副本与来源管理（设置界面的知识库管理用）
+// ---------------------------------------------------------------------------
+
+/// 知识库源文件副本目录名（保存原文，供设置界面查看全文）。
+pub const SOURCES_DIR: &str = "sources";
+
+fn sources_dir(dir: &Path) -> PathBuf {
+    dir.join(SOURCES_DIR)
+}
+
+/// 保存源文件副本（原文）。
+pub fn save_source_file(dir: &Path, name: &str, content: &str) -> Result<()> {
+    std::fs::create_dir_all(sources_dir(dir))?;
+    std::fs::write(sources_dir(dir).join(name), content)
+        .with_context(|| format!("写入源文件副本 '{name}' 失败"))
+}
+
+/// 读源文件副本；不存在时返回 None。
+pub fn read_source_file(dir: &Path, name: &str) -> Option<String> {
+    std::fs::read_to_string(sources_dir(dir).join(name)).ok()
+}
+
+/// 删除源文件副本（不存在则忽略）。
+pub fn remove_source_file(dir: &Path, name: &str) {
+    let _ = std::fs::remove_file(sources_dir(dir).join(name));
+}
+
+/// 从索引中移除某来源的所有分块，返回移除数量（无索引时返回 0）。
+pub fn remove_source(dir: &Path, source: &str) -> Result<usize> {
+    let Some(mut kb) = load_dir(dir)? else {
+        return Ok(0);
+    };
+    let before = kb.chunks.len();
+    kb.chunks.retain(|c| c.source != source);
+    let removed = before - kb.chunks.len();
+    if removed > 0 {
+        save_dir(&kb, dir)?;
+    }
+    Ok(removed)
+}
+
+/// 按索引顺序列出所有来源及其分块数（去重）。
+pub fn source_stats(dir: &Path) -> Result<Vec<(String, usize)>> {
+    let Some(kb) = load_dir(dir)? else {
+        return Ok(Vec::new());
+    };
+    let mut out: Vec<(String, usize)> = Vec::new();
+    for c in &kb.chunks {
+        if let Some(e) = out.iter_mut().find(|(s, _)| s == &c.source) {
+            e.1 += 1;
+        } else {
+            out.push((c.source.clone(), 1));
+        }
+    }
+    Ok(out)
+}
+
+/// 无源文件副本时按索引顺序重建某来源全文（分块以空行连接，近似原文）。
+pub fn reconstruct_source(dir: &Path, source: &str) -> Option<String> {
+    let kb = load_dir(dir).ok()??;
+    let parts: Vec<&str> = kb
+        .chunks
+        .iter()
+        .filter(|c| c.source == source)
+        .map(|c| c.text.as_str())
+        .collect();
+    if parts.is_empty() {
+        None
+    } else {
+        Some(parts.join("\n\n"))
+    }
+}
+
 // ---------- 检索 ----------
 
 fn backend_dim(backend: &str) -> usize {

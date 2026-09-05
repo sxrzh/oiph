@@ -1,9 +1,10 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { getContest, getProblem, getSessions, switchSession } from './api';
 import type { ContestData, ProblemDetail, SessionInfo } from './types';
-import type { CostParts, UsageParts, WsMessage } from './api';
+import type { BudgetInfo, CostParts, UsageParts, WsMessage } from './api';
 import { zeroUsage } from './api';
 import { MenuBar, StatusBar } from './components/Layout';
+import { swAlert } from './components/sw';
 import { ProblemArea } from './components/ProblemArea';
 import { ChatArea } from './components/ChatArea';
 import { SessionBar } from './components/SessionBar';
@@ -46,6 +47,9 @@ export default function App() {
   // 累计费用（基线 + 回合精确；流估算不计费）
   const [costBase, setCostBase] = useState<CostParts | null>(null);
   const [costTurn, setCostTurn] = useState<CostParts | null>(null);
+  // 费用预算（随 usage/usage_turn 消息更新）
+  const [budget, setBudget] = useState<BudgetInfo | null>(null);
+  const budgetWarnedRef = useRef(false);
   const wsRef = useRef<WebSocket | null>(null);
   const currentMsgRef = useRef<DisplayMessage | null>(null);
   const currentAgentRef = useRef<string>('supervisor');
@@ -214,6 +218,7 @@ export default function App() {
       setUsageLive({ input: 0, output: 0 });
       setCostBase(u.cost ?? null);
       setCostTurn(null);
+      if ('budget' in u) setBudget(u.budget ?? null);
     } else if (msg.type === 'usage_turn') {
       // 本回合精确累计（基线之上）
       const u = (msg as any).usage;
@@ -224,6 +229,7 @@ export default function App() {
       });
       setUsageLive({ input: 0, output: 0 });
       setCostTurn(u.cost ?? null);
+      if ('budget' in u) setBudget(u.budget ?? null);
     } else if (msg.type === 'usage_live') {
       setUsageLive({ input: (msg as any).input ?? 0, output: (msg as any).output ?? 0 });
     } else if (msg.type === 'log') {
@@ -252,6 +258,19 @@ export default function App() {
       }
     }
   };
+
+  // 预算警告：首次越过阈值与每次打开页面（初始即为越过）时 sweetalert 提醒
+  const overWarn = budget ? budget.limit - budget.used < budget.warn : false;
+  useEffect(() => {
+    if (overWarn && !budgetWarnedRef.current && budget) {
+      budgetWarnedRef.current = true;
+      swAlert(
+        '费用预算警告',
+        `API 费用已接近预算：${budget.used.toFixed(2)} / ${budget.limit} ${budget.currency}`,
+      );
+    }
+    if (!overWarn) budgetWarnedRef.current = false;
+  }, [overWarn, budget]);
 
   const handleSend = (text: string) => {
     setMessages(m => [...m, { role: 'user', content: text }]);
@@ -345,6 +364,7 @@ export default function App() {
                 amount: (costBase?.amount ?? 0) + (costTurn?.amount ?? 0),
               }
             : null,
+          budget,
         }}
       />
     </div>

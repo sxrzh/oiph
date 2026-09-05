@@ -17,6 +17,8 @@ mod dupcheck;
 mod export_lemon;
 mod kb;
 mod model;
+mod budget;
+mod fx;
 mod paths;
 mod pricing;
 mod project;
@@ -123,6 +125,11 @@ enum Commands {
     Export {
         #[command(subcommand)]
         cmd: ExportCmd,
+    },
+    /// 费用预算管理（~/.oiph/config/limit.json）。
+    Fee {
+        #[command(subcommand)]
+        cmd: FeeCmd,
     },
     /// 集成测试：编译、造数据、验证、运行 std 和 sols。
     Test {
@@ -357,6 +364,7 @@ async fn main() -> Result<()> {
         Some(Commands::Skill { cmd }) => return run_skill_cmd(&cli, cmd),
         Some(Commands::Prompt { cmd }) => return run_prompt_cmd(cmd),
         Some(Commands::Session { cmd }) => return run_session_cmd(&cli, cmd),
+        Some(Commands::Fee { cmd }) => return run_fee_cmd(cmd),
         Some(Commands::Export { cmd }) => return run_export_cmd(&cli, cmd),
         Some(Commands::Test { problem }) => return run_test_cmd(&cli, problem.as_deref()),
         Some(Commands::Status) => {
@@ -631,6 +639,25 @@ enum ExportCmd {
         /// 输出目录（默认 <比赛目录>/<比赛名>_lemon/）。
         output: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+enum FeeCmd {
+    /// 重置预算已用量（used 清零，limit/warn/currency 不变）。
+    Reset,
+}
+
+fn run_fee_cmd(cmd: &FeeCmd) -> Result<()> {
+    match cmd {
+        FeeCmd::Reset => {
+            let b = budget::reset_used()?;
+            println!(
+                "预算已重置：used = 0（limit {} {} 不变）",
+                b.limit, b.currency
+            );
+            Ok(())
+        }
+    }
 }
 
 fn run_export_cmd(cli: &Cli, cmd: &ExportCmd) -> Result<()> {

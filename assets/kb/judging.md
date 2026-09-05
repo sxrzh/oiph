@@ -6,9 +6,9 @@
 
 题目类型四种：`traditional`（传统题）、`function`（函数交互题）、`interactive_io`（IO 交互题）、`answer_only`（提交答案题）。
 
-- 辅助程序一律放在题目目录 `auxiliary/` 下：`generator.cpp`、`validator.cpp`、`checker.cpp` 必需，交互题另有 `interactive_lib.cpp`（函数交互题还有 `<题目ID>.h`）。
+- 辅助程序一律放在题目目录 `auxiliary/` 下：`generator.cpp`、`validator.cpp`、`checker.cpp` 必需，交互题另有 `interactive_lib.cpp`（函数交互题还有 `<题目ID>.h`），除函数交互题的 `interactive_lib.cpp` 外，所有辅助程序**必须**基于 testlib。
 - 编译命令：`g++ <compile_flags> -I auxiliary -o <输出> <源文件>`；`testlib.h` 已由题目创建时放入 `auxiliary/`（来自 `~/.oiph/vendor/testlib.h`）。
-- generator / validator / checker 缺失任何一个，该题集成测试直接报错终止（不用 diff 兜底）。
+- generator / validator / checker 缺失任何一个，该题集成测试直接报错终止。
 - 所有子进程都有超时保护；时间上限 `T = ceil(time_limit_ms × 1.5 / 1000)` 秒。
 
 ## 数据准备（四种题型一致）
@@ -37,7 +37,7 @@
 ## IO 交互题（interactive_io）
 
 - 待测程序（std 或 sol）**单独**编译；`interactive_lib.cpp` 单独编译为 **grader**。
-- grader 约定：`argv[1]` = 输入文件路径，`argv[2]` = 输出文件路径（最终答案写入此文件），stdin/stdout 与待测程序交互。grader 通常基于 testlib interactor（`registerInteraction`）。
+- grader 约定：`argv[1]` = 输入文件路径，`argv[2]` = 输出文件路径（最终答案写入此文件），stdin/stdout 与待测程序交互。grader **必须**基于 testlib interactor（`registerInteraction`）。
 - 每个测试点通过命名管道相连，等价于以下 bash 脚本：
 
   ```sh

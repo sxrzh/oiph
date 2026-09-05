@@ -3,3 +3,5 @@
 contests/
 *.log
 ref/
+make_release.sh
+*.zip

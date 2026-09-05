@@ -127,12 +127,12 @@ enum Commands {
         #[command(subcommand)]
         cmd: ExportCmd,
     },
-    /// 初始化 ~/.oiph（安装 skills/kb/prompts/vendor，生成 limit.json 与 agents.json）。
+    /// 初始化 ~/.oiph（安装 skills/kb/prompts/vendor/前端，生成 limit.json 与 agents.json）。
     Init {
         /// 强制覆盖已存在的 skills 与 prompts（vendor 同样覆盖；limit.json/agents.json 不覆盖）
         #[arg(long)]
         force: bool,
-        /// 资产来源目录（含 skills/ kb/ prompts/ auxiliary/testlib.h lemon/testlib.h），
+        /// 资产来源目录（含 skills/ kb/ prompts/ vendor/{testlib.h,testlib_lemon.h}），
         /// 缺省依次尝试 ./assets 与可执行文件旁的 assets
         #[arg(long)]
         assets: Option<String>,

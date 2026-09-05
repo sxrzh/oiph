@@ -153,8 +153,8 @@ pub async fn run_init(force: bool, assets: Option<&str>) -> Result<()> {
     // 4. vendor（testlib.h / testlib_lemon.h；已存在跳过，--force 覆盖）
     let vendor_dst = paths::vendor_dir();
     let vendor_pairs = [
-        (assets_dir.join("auxiliary/testlib.h"), "testlib.h"),
-        (assets_dir.join("lemon/testlib.h"), "testlib_lemon.h"),
+        (assets_dir.join("vendor/testlib.h"), "testlib.h"),
+        (assets_dir.join("vendor/testlib_lemon.h"), "testlib_lemon.h"),
     ];
     if vendor_pairs.iter().all(|(s, _)| s.is_file()) {
         std::fs::create_dir_all(&vendor_dst)?;
@@ -208,6 +208,41 @@ pub async fn run_init(force: bool, assets: Option<&str>) -> Result<()> {
         println!("  agents.json 已存在，跳过");
     }
 
+    // 7. 前端（~/.oiph/frontend/dist；已存在跳过，--force 覆盖）
+    //    来源依次尝试：<assets>/frontend/dist、./frontend/dist、<exe>/frontend/dist
+    install_frontend(&assets_dir, force)?;
+
     println!("初始化完成。全局配置目录：{}", home.display());
+    Ok(())
+}
+
+/// 安装 Web 前端到 `~/.oiph/frontend/dist`。
+fn install_frontend(assets_dir: &Path, force: bool) -> Result<()> {
+    let web_dst = paths::web_dist_dir();
+    let mut candidates: Vec<PathBuf> = vec![
+        assets_dir.join("frontend").join("dist"),
+        PathBuf::from("frontend").join("dist"),
+    ];
+    if let Some(exe) = std::env::current_exe().ok()
+        && let Some(parent) = exe.parent() {
+            candidates.push(parent.join("frontend").join("dist"));
+        }
+    let Some(src) = candidates.iter().find(|p| p.is_dir()) else {
+        eprintln!(
+            "警告：未找到 frontend/dist（已尝试 ./frontend/dist 等），页面将不可用。\
+请构建前端后手动复制到 {}",
+            web_dst.display()
+        );
+        return Ok(());
+    };
+    if web_dst.exists() && !force {
+        println!("  前端已存在（{}），跳过（--force 覆盖）", web_dst.display());
+        return Ok(());
+    }
+    if web_dst.exists() {
+        std::fs::remove_dir_all(&web_dst)?;
+    }
+    copy_dir_contents(src, &web_dst)?;
+    println!("✓ 安装前端（来源 {}）", src.display());
     Ok(())
 }

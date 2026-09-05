@@ -27,6 +27,11 @@ pub fn vendor_dir() -> PathBuf {
     oiph_home().join("vendor")
 }
 
+/// Web 前端目录：`~/.oiph/frontend/dist`（用户自行复制 frontend/dist 到此处）。
+pub fn web_dist_dir() -> PathBuf {
+    oiph_home().join("frontend").join("dist")
+}
+
 /// 读取 vendor 中的文件；不存在时报错（提示运行 init.sh）。
 pub fn vendor_read(name: &str) -> anyhow::Result<String> {
     let p = vendor_dir().join(name);

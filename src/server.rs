@@ -144,8 +144,17 @@ pub async fn serve(app: Arc<App>, port: u16) -> anyhow::Result<()> {
         .route("/api/skill/add", post(post_skill_add))
         .route("/api/skill/delete", post(post_skill_delete))
         .route("/ws", get(ws_handler))
-        .fallback_service(ServeDir::new(concat!(env!("CARGO_MANIFEST_DIR"), "/frontend/dist")))
+        .fallback_service(ServeDir::new(crate::paths::web_dist_dir()))
         .with_state(state);
+
+    // 前端未安装时提前提醒（API 仍可用，页面会 404）
+    let web_dir = crate::paths::web_dist_dir();
+    if !web_dir.is_dir() {
+        eprintln!(
+            "警告：前端未安装（{} 不存在）。请将仓库 frontend/dist 复制到该目录：\n  mkdir -p ~/.oiph/frontend && cp -r frontend/dist ~/.oiph/frontend/",
+            web_dir.display()
+        );
+    }
 
     let addr = format!("0.0.0.0:{port}");
     println!("GUI 服务器启动：http://localhost:{port}");

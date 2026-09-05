@@ -1,28 +1,20 @@
-# OIPH
+# OIPH - 信息学竞赛组题助手 Agent
 
-An agent to help with OI contest problem preparing.
+OIPH（OI Preparer Helper）是一个专为辅助信息学竞赛模拟赛组题工作全流程而设计的 Agent 工具，工作流涵盖找题/出题、造数据、写题解、验题、集成测试、打包等。
 
-As a part-time or professional OI trainer, you may be frustrated preparing a training contest, which contains several repeated and time-consuming works:
-- searching remote contests rarely known by your contestants and do some modification
-- searching for official testcases or making it by your own
-- searching for std solution or solving it yourself
-- packing into packages in formats like Polygon, lemon, ...
+## 前言
 
-This agent is here to help you out! Based on high problem-solving ability of LLMs and automated pipelines, the workflow above will be done fast like a lightning.
+每一场被选手记住的 OI 模拟赛，背后都站着一个在深夜里反复打磨的组题人。
 
-## 架构
+他要在浩如烟海的题库里翻出几道"冷门得恰到好处"的题——既不曾被选手撞见，又恰好配得上他们的野心；要为每道题打磨题面、推敲数据、写出一份经得起质疑的 std；要和 generator、checker、validator、交互库们逐一搏斗，直到它们学会在评测机上沉默地各司其职；再补上题解、打包、导出……如此往复。这些劳动并非没有意义，只是它们本该让位于一件更重要的事：把一场比赛真正打磨成一次思维的冒险。
 
-多 Agent 系统，与用户交互的是 supervisor，它以工具调用的形式调度子 Agent：
+OI 组题，不该是一场让人望而生畏的苦役。
 
-- **supervisor**：根据用户命令规划任务（原创 / 搬运流程）、调度子 Agent、检查质量、汇报
-- **searching-agent**：搜索冷门题目与资料（std、测试数据、辅助程序），估计难度与知识点
-- **statement-agent**：出题 / 写题面 / 改编题面 / 写题解
-- **solution-agent**：设计算法写 std 及其他解法，预估评测结果
-- **auxiliary-agent**：写 generator / checker / validator / interactive_lib 并造数据
+这就是 OIPH 的由来：把"组一场高质量模拟赛"从一项持续数周的事务性工程，压缩成一段与助手的对话。它未必比经验老到的出题人更懂出题——但它可以不知疲倦地翻遍冷门角落，可以把你灵感忽至的 idea 迅速补全成一道完善的题目，可以替你试过几百种数据的边界，一丝不苟地补齐每一份代码与配置，并在几分钟内完成你过去要耗尽整个下午的重复劳动。它是一支召之即来的团队：有人去搜题，有人写题面，有人写 std，有人造数据、写校验器和评测器——而那位真正的组题人，依然稳稳坐在驾驶席上：方向由你定，质量由你把关，每一道关键抉择都留给你。
 
-所有 Agent 支持工具调用（bash、读写文件、Bing 搜索、fetch_url、RAG 知识库、Skills）。
+它站在训练者这一边，让"好训练"不再稀缺。
 
-## 构建与运行
+## 从源码构建
 
 ```sh
 cargo build
@@ -117,6 +109,18 @@ cargo build
 | `/session list` `/session new [名]` `/session use <名>` `/session delete <名>` `/session export [名] [路径]` | 会话 |
 | `/exit` | 退出 |
 
+## 架构
+
+OIPH 为多 Agent 系统，与用户交互的是 supervisor，它以工具调用的形式调度子 Agent：
+
+- **supervisor**：根据用户命令规划任务（原创 / 搬运流程）、调度子 Agent、检查质量、汇报
+- **searching-agent**：负责搜索工作：搜索冷门题目与资料（std、测试数据、辅助程序），估计难度与知识点
+- **statement-agent**：负责文字工作：出题 / 写题面 / 改编题面 / 写题解
+- **solution-agent**：作为验题人，设计算法写 std 及其他解法，预估评测结果
+- **auxiliary-agent**：写 generator / checker / validator / interactive_lib 并造数据
+
+所有 Agent 支持工具调用、RAG 知识库、Skill 加载。
+比赛以比赛工程的形式存储，Agent 可以调用专门的
 ## Skills
 
 Skill 是一个目录，内含 `SKILL.md`（YAML frontmatter：`name`、`description`，后接指令正文）：

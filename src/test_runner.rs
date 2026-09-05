@@ -112,7 +112,7 @@ fn run_one(contest_dir: &Path, pid: &str) -> anyhow::Result<TestReport> {
     let aux_dir = pdir.join("auxiliary");
 
     // 临时目录
-    let tmp = std::env::temp_dir().join(format!("preparer_test_{}_{}", pid, uuid::Uuid::new_v4()));
+    let tmp = std::env::temp_dir().join(format!("oiph_test_{}_{}", pid, uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&tmp)?;
 
     // 确保 testlib.h 存在（从 ~/.oiph/vendor/testlib.h 复制；启动时已检查 vendor 存在）

@@ -561,7 +561,7 @@ mod tests {
     use crate::model::{self, ProblemType, Verdict};
 
     fn tmp_dir(name: &str) -> PathBuf {
-        let p = std::env::temp_dir().join(format!("preparer_test_{}_{}", name, uuid::Uuid::new_v4()));
+        let p = std::env::temp_dir().join(format!("oiph_test_{}_{}", name, uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&p).unwrap();
         p
     }

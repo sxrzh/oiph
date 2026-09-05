@@ -317,7 +317,7 @@ pub fn cmd_list(dirs: &[PathBuf]) -> Result<()> {
         }
     }
     if !any {
-        println!("知识库为空（用 `preparer kb add <文件>` 添加文档）");
+        println!("知识库为空（用 `oiph kb add <文件>` 添加文档）");
     }
     Ok(())
 }
@@ -514,7 +514,7 @@ mod tests {
 
     #[tokio::test]
     async fn search_missing_dirs_is_empty() {
-        let dir = std::env::temp_dir().join("preparer-test-does-not-exist");
+        let dir = std::env::temp_dir().join("oiph-test-does-not-exist");
         let out = search(&cfg_with(vec![dir]), "anything", 1).await.unwrap();
         assert!(out.contains("为空"), "got: {out}");
     }

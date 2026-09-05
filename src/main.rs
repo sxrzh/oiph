@@ -1,12 +1,12 @@
 //! OI 模拟赛组题助手：多 Agent 系统 CLI。
 //!
 //! 用法：
-//! - `preparer`：进入交互式对话（supervisor agent），在比赛目录下自动加载上次 session。
-//! - `preparer "任务描述"`：单次任务（非交互模式读 stdin 多行任务）。
-//! - `preparer status`：打印当前工程状态。
-//! - `preparer kb add|list|clear|search`：管理知识库（全局 ~/.oiph/kb 或工程 .oiph/kb）。
-//! - `preparer skill list|show|add|delete`：管理 skills。
-//! - `preparer session list|new|use|delete|export|show`：管理会话。
+//! - `oiph`：进入交互式对话（supervisor agent），在比赛目录下自动加载上次 session。
+//! - `oiph "任务描述"`：单次任务（非交互模式读 stdin 多行任务）。
+//! - `oiph status`：打印当前工程状态。
+//! - `oiph kb add|list|clear|search`：管理知识库（全局 ~/.oiph/kb 或工程 .oiph/kb）。
+//! - `oiph skill list|show|add|delete`：管理 skills。
+//! - `oiph session list|new|use|delete|export|show`：管理会话。
 //! - 交互式下支持 `/` 开头的本地指令，见 `/help`。
 
 mod agent;
@@ -19,6 +19,7 @@ mod kb;
 mod model;
 mod budget;
 mod fx;
+mod initcmd;
 mod paths;
 mod pricing;
 mod project;
@@ -49,7 +50,7 @@ use state::App;
 
 #[derive(Parser)]
 #[command(
-    name = "preparer",
+    name = "oiph",
     about = "OI 模拟赛组题助手：supervisor + 多个子 Agent（searching/statement/solution/auxiliary），\
 支持工具调用、RAG 知识库、Skills。"
 )]
@@ -125,6 +126,16 @@ enum Commands {
     Export {
         #[command(subcommand)]
         cmd: ExportCmd,
+    },
+    /// 初始化 ~/.oiph（安装 skills/kb/prompts/vendor，生成 limit.json 与 agents.json）。
+    Init {
+        /// 强制覆盖已存在的 skills 与 prompts（vendor 同样覆盖；limit.json/agents.json 不覆盖）
+        #[arg(long)]
+        force: bool,
+        /// 资产来源目录（含 skills/ kb/ prompts/ auxiliary/testlib.h lemon/testlib.h），
+        /// 缺省依次尝试 ./assets 与可执行文件旁的 assets
+        #[arg(long)]
+        assets: Option<String>,
     },
     /// 费用预算管理（~/.oiph/config/limit.json）。
     Fee {
@@ -300,11 +311,14 @@ struct WorkspaceState {
     current_contest: Option<String>,
 }
 
-const WS_STATE_FILE: &str = ".preparer.yaml";
+const WS_STATE_FILE: &str = ".oiph.yaml";
+/// 旧版状态文件名（读取时兼容）。
+const WS_STATE_FILE_LEGACY: &str = ".preparer.yaml";
 
 fn load_ws_state(root: &Path) -> WorkspaceState {
     let p = root.join(WS_STATE_FILE);
     std::fs::read_to_string(&p)
+        .or_else(|_| std::fs::read_to_string(root.join(WS_STATE_FILE_LEGACY)))
         .ok()
         .and_then(|s| serde_yaml::from_str(&s).ok())
         .unwrap_or_default()
@@ -321,7 +335,7 @@ fn save_ws_state(root: &Path, ws: &WorkspaceState) -> Result<()> {
 /// 解析当前比赛目录：
 /// 1. 命令行 --contest；
 /// 2. 工作目录本身是比赛工程；
-/// 3. .preparer.yaml 记录的上次比赛。
+/// 3. .oiph.yaml（旧 .preparer.yaml）记录的上次比赛。
 fn resolve_contest(root: &Path, cli_contest: Option<&str>) -> Option<PathBuf> {
     if let Some(c) = cli_contest {
         let p = Path::new(c);
@@ -350,13 +364,16 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let root = std::env::current_dir()?;
 
-    // 启动检查：vendor/testlib.h 必须存在（init.sh 初始化），否则无法继续
-    let vendor_testlib = paths::vendor_dir().join("testlib.h");
-    anyhow::ensure!(
-        vendor_testlib.is_file(),
-        "缺少 {}，请先运行 init.sh 初始化",
-        vendor_testlib.display()
-    );
+    // 启动检查：vendor/testlib.h 必须存在（由 init 命令或 init.sh 安装）；
+    // init 命令本身负责安装 vendor，跳过检查
+    if !matches!(cli.command, Some(Commands::Init { .. })) {
+        let vendor_testlib = paths::vendor_dir().join("testlib.h");
+        anyhow::ensure!(
+            vendor_testlib.is_file(),
+            "缺少 {}，请先运行 `oiph init` 初始化",
+            vendor_testlib.display()
+        );
+    }
 
     match &cli.command {
         Some(Commands::Cli { prompt }) => return run_cli(&cli, prompt.as_deref()).await,
@@ -365,6 +382,9 @@ async fn main() -> Result<()> {
         Some(Commands::Prompt { cmd }) => return run_prompt_cmd(cmd),
         Some(Commands::Session { cmd }) => return run_session_cmd(&cli, cmd),
         Some(Commands::Fee { cmd }) => return run_fee_cmd(cmd),
+        Some(Commands::Init { force, assets }) => {
+            return initcmd::run_init(*force, assets.as_deref()).await;
+        }
         Some(Commands::Export { cmd }) => return run_export_cmd(&cli, cmd),
         Some(Commands::Test { problem }) => return run_test_cmd(&cli, problem.as_deref()),
         Some(Commands::Status) => {
@@ -552,7 +572,7 @@ fn run_session_cmd(cli: &Cli, cmd: &SessionCmd) -> Result<()> {
         SessionCmd::List => {
             let metas = session::list(&cdir)?;
             if metas.is_empty() {
-                println!("没有会话（用 `preparer session new` 新建）");
+                println!("没有会话（用 `oiph session new` 新建）");
             }
             for m in &metas {
                 println!(
@@ -628,7 +648,7 @@ fn resolve_session_name(cdir: &Path, name: Option<&str>) -> Result<String> {
             Ok(n.to_string())
         }
         None => session::current_name(cdir)
-            .ok_or_else(|| anyhow!("没有当前会话，请指定名称或用 `preparer session new`")),
+            .ok_or_else(|| anyhow!("没有当前会话，请指定名称或用 `oiph session new`")),
     }
 }
 
@@ -773,7 +793,7 @@ async fn run_repl(cli: &Cli, root: &Path) -> Result<()> {
 
     if tty {
         println!(
-            "OI 模拟赛组题助手（preparer）。当前比赛：{}",
+            "OI 模拟赛组题助手（oiph）。当前比赛：{}",
             contest_dir
                 .as_deref()
                 .map(|d| d.display().to_string())
@@ -1442,7 +1462,7 @@ mod tests {
 
     #[test]
     fn ws_state_roundtrip() {
-        let d = std::env::temp_dir().join(format!("preparer_test_ws_{}", uuid::Uuid::new_v4()));
+        let d = std::env::temp_dir().join(format!("oiph_test_ws_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&d).unwrap();
         let ws = WorkspaceState {
             current_contest: Some("abc".into()),

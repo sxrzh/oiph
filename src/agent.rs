@@ -1372,7 +1372,7 @@ mod tests {
     async fn project_tools_work_end_to_end() {
         // add_problem 等需要 vendor/testlib.h：沙盒 HOME
         let _home = crate::paths::tests::sandbox_home_with_vendor("agent_e2e");
-        let root = std::env::temp_dir().join(format!("preparer_test_agent_{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("oiph_test_agent_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let app = test_app(root.clone());
         let d = deps();
@@ -1406,7 +1406,7 @@ mod tests {
 
     #[tokio::test]
     async fn tools_require_contest() {
-        let root = std::env::temp_dir().join(format!("preparer_test_noct_{}", uuid::Uuid::new_v4()));
+        let root = std::env::temp_dir().join(format!("oiph_test_noct_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let app = test_app(root.clone());
         let d = deps();

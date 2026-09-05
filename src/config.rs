@@ -180,7 +180,7 @@ pub fn load_agent_setup(
         let prompt_path = expand_tilde(prompt_path);
         let text = std::fs::read_to_string(&prompt_path).with_context(|| {
             format!(
-                "读取 agent '{name}' 的提示词失败：{}（可用 `preparer prompt update {name} <文件>` 恢复）",
+                "读取 agent '{name}' 的提示词失败：{}（可用 `oiph prompt update {name} <文件>` 恢复）",
                 prompt_path.display()
             )
         })?;

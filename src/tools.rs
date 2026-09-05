@@ -106,11 +106,14 @@ pub fn definition(name: &str) -> Option<Tool> {
         function: match name {
             "bash" => FunctionDef {
                 name: "bash".into(),
-                description: "执行 bash 命令并返回合并的 stdout/stderr。工作目录为当前比赛目录。".into(),
+                description: "执行 bash 命令并返回合并的 stdout/stderr。工作目录为当前比赛目录。\
+注意：命令默认 20 秒后超时中止并返回超时提示；编译、完整测试等耗时命令请用 timeout_secs 指定足够的秒数。"
+                    .into(),
                 parameters: serde_json::json!({
                     "type": "object",
                     "properties": {
-                        "command": { "type": "string", "description": "要执行的 bash 命令。" }
+                        "command": { "type": "string", "description": "要执行的 bash 命令。" },
+                        "timeout_secs": { "type": "integer", "description": "最长运行时间（秒），超过则中止命令并告知超时；不填默认 20 秒。" }
                     },
                     "required": ["command"]
                 }),
@@ -282,12 +285,20 @@ pub async fn dispatch_base(ctx: &ToolContext, name: &str, args: &Value) -> Optio
 
 async fn run_bash(ctx: &ToolContext, args: &Value) -> Result<String> {
     let command = get_str(args, "command")?;
+    // 最长用时（秒）：不填默认 20；非法值也回退默认
+    let timeout_secs = args
+        .get("timeout_secs")
+        .and_then(|v| v.as_u64())
+        .filter(|&s| s > 0 && s <= 3600)
+        .unwrap_or(20);
     let child = Command::new("bash")
         .arg("-c")
         .arg(&command)
         .current_dir(&ctx.workdir)
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())
+        // 独立进程组：超时可以整组杀掉（含孙进程）
+        .process_group(0)
         .spawn()
         .map_err(|e| anyhow::anyhow!("启动 bash 失败：{e}"))?;
 
@@ -295,9 +306,25 @@ async fn run_bash(ctx: &ToolContext, args: &Value) -> Result<String> {
     // 子进程守卫：future 被 drop 时杀掉子进程
     let _guard = ChildGuard { pid };
 
-    let output = child.wait_with_output()
-        .await
-        .map_err(|e| anyhow::anyhow!("等待 bash 失败：{e}"))?;
+    let wait_fut = child.wait_with_output();
+    tokio::pin!(wait_fut);
+    let output = match tokio::time::timeout(std::time::Duration::from_secs(timeout_secs), wait_fut.as_mut()).await {
+        Ok(output) => output.map_err(|e| anyhow::anyhow!("等待 bash 失败：{e}"))?,
+        Err(_) => {
+            // 超时：杀掉整个进程组（负 pid），并告知 agent 超过时间限制
+            if let Some(p) = pid {
+                let _ = Command::new("kill")
+                    .arg("-9")
+                    .arg(format!("-{p}"))
+                    .output()
+                    .await;
+            }
+            return Ok(format!(
+                "[命令超时：运行超过 {timeout_secs} 秒，已被中止，输出丢弃。\
+请检查命令是否卡住或耗时过长；确需更长时间请用 timeout_secs 参数指定更大值后重试]"
+            ));
+        }
+    };
 
     let mut combined = String::new();
     if !output.stdout.is_empty() {
@@ -563,12 +590,12 @@ mod tests {
     use serde_json::json;
 
     fn test_ctx() -> ToolContext {
-        let d = std::env::temp_dir().join("preparer_test_ctx");
+        let d = std::env::temp_dir().join("oiph_test_ctx");
         std::fs::create_dir_all(&d).ok();
         ToolContext {
             workdir: d,
-            kb_dirs: vec![std::env::temp_dir().join("preparer-test-nonexistent-kb")],
-            skill_roots: vec![std::env::temp_dir().join("preparer-test-nonexistent-skills")],
+            kb_dirs: vec![std::env::temp_dir().join("oiph-test-nonexistent-kb")],
+            skill_roots: vec![std::env::temp_dir().join("oiph-test-nonexistent-skills")],
             base_url: "http://localhost:1/v1".into(),
             api_key: "test".into(),
             embed_model: None,
@@ -579,10 +606,10 @@ mod tests {
     #[tokio::test]
     async fn bash_runs_echo() {
         let ctx = test_ctx();
-        let out = dispatch_base(&ctx, "bash", &json!({"command": "echo hello-preparer"}))
+        let out = dispatch_base(&ctx, "bash", &json!({"command": "echo hello-oiph"}))
             .await
             .unwrap();
-        assert!(out.contains("hello-preparer"), "got: {out}");
+        assert!(out.contains("hello-oiph"), "got: {out}");
         assert!(out.contains("exit code 0"));
     }
 
@@ -628,6 +655,43 @@ mod tests {
         assert!(out.contains("testlib.h"));
         assert!(ctx.workdir.join("testlib.h").exists());
         std::fs::remove_file(ctx.workdir.join("testlib.h")).ok();
+    }
+
+    #[tokio::test]
+    async fn bash_timeout_kills_and_reports() {
+        let ctx = test_ctx();
+        let start = std::time::Instant::now();
+        let out = dispatch_base(
+            &ctx,
+            "bash",
+            &json!({ "command": "sleep 30", "timeout_secs": 1 }),
+        )
+        .await
+        .unwrap();
+        // 应在 ~1s 返回（远小于 sleep 的 30s），并告知超时
+        assert!(start.elapsed() < std::time::Duration::from_secs(10));
+        assert!(out.contains("超时"), "got: {out}");
+        assert!(out.contains("timeout_secs"), "got: {out}");
+    }
+
+    #[tokio::test]
+    async fn bash_timeout_default_20s_and_normal_run() {
+        let ctx = test_ctx();
+        // 正常命令不受影响
+        let out = dispatch_base(&ctx, "bash", &json!({ "command": "echo hello" }))
+            .await
+            .unwrap();
+        assert!(out.contains("hello"), "got: {out}");
+        assert!(out.contains("exit code 0"));
+        // timeout_secs 非法值回退默认（这里只验证不报错即可，不真等 20s）
+        let out = dispatch_base(
+            &ctx,
+            "bash",
+            &json!({ "command": "echo quick", "timeout_secs": 0 }),
+        )
+        .await
+        .unwrap();
+        assert!(out.contains("quick"), "got: {out}");
     }
 
     #[test]

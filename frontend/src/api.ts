@@ -62,7 +62,7 @@ export interface CostParts {
 
 export const zeroUsage = (): UsageParts => ({ input: 0, output: 0, hit: 0 });
 
-export async function exportLemon(): Promise<{ ok?: boolean; path?: string; error?: string }> {
+export async function exportLemon(): Promise<{ ok?: boolean; path?: string; error?: string; warnings?: string[] }> {
   return fetch('/api/export/lemon', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }).then(r => r.json());
 }
 

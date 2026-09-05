@@ -91,7 +91,7 @@ pub fn definition(name: &str) -> Option<Tool> {
                     "properties": {
                         "id": { "type": "string", "description": "题目目录名（英文/数字/连字符）。" },
                         "name": { "type": "string", "description": "题目名称。" },
-                        "problem_type": { "type": "string", "description": "traditional/interactive_lib/interactive_io/answer_only/function" },
+                        "problem_type": { "type": "string", "description": "traditional/function（函数交互）/interactive_io/answer_only" },
                         "source": { "type": "string", "description": "original/moved/adapted" }
                     },
                     "required": ["id"]
@@ -107,7 +107,7 @@ pub fn definition(name: &str) -> Option<Tool> {
                         "name": { "type": "string" },
                         "tags": { "type": "array", "items": { "type": "string" } },
                         "source": { "type": "string", "description": "original/moved/adapted" },
-                        "problem_type": { "type": "string", "description": "traditional/interactive_lib/interactive_io/answer_only/function" },
+                        "problem_type": { "type": "string", "description": "traditional/function（函数交互）/interactive_io/answer_only" },
                         "time_limit_ms": { "type": "integer" },
                         "memory_limit_mb": { "type": "integer" }
                     }
@@ -793,13 +793,22 @@ async fn tool_add_problem(ctx: &ToolContext, args: &Value) -> String {
             source,
         },
     ) {
-        Ok(p) => format!(
-            "已添加题目 {}（{}，{}，{}）",
-            p.id,
-            p.name,
-            p.problem_type.label(),
-            p.source.label()
-        ),
+        Ok(p) => {
+            let mut msg = format!(
+                "已添加题目 {}（{}，{}，{}）",
+                p.id,
+                p.name,
+                p.problem_type.label(),
+                p.source.label()
+            );
+            if !p.created_files.is_empty() {
+                msg.push_str("\n\n已创建以下文件（内容为空，需要补全）：");
+                for f in &p.created_files {
+                    msg.push_str(&format!("\n- {f}"));
+                }
+            }
+            msg
+        }
         Err(e) => err_str(e),
     }
 }
@@ -1269,10 +1278,10 @@ fn parse_problem_type(s: &str) -> Option<ProblemType> {
     let t = s.trim().to_lowercase();
     Some(match t.as_str() {
         "traditional" | "传统" | "传统题" => ProblemType::Traditional,
-        "interactive_lib" | "interactivlib" | "函数交互" => ProblemType::InteractiveLib,
+        // interactive_lib 为旧类型名，合并入 function
+        "interactive_lib" | "interactivlib" | "函数交互" | "function" | "函数题" => ProblemType::Function,
         "interactive_io" | "interactiveio" | "io 交互" | "io交互" => ProblemType::InteractiveIO,
         "answer_only" | "answeronly" | "提交答案" => ProblemType::AnswerOnly,
-        "function" | "函数题" => ProblemType::Function,
         _ => return None,
     })
 }
@@ -1339,7 +1348,9 @@ mod tests {
     #[test]
     fn parse_types_and_sources() {
         assert_eq!(parse_problem_type("traditional"), Some(ProblemType::Traditional));
-        assert_eq!(parse_problem_type("函数交互"), Some(ProblemType::InteractiveLib));
+        assert_eq!(parse_problem_type("函数交互"), Some(ProblemType::Function));
+        assert_eq!(parse_problem_type("interactive_lib"), Some(ProblemType::Function));
+        assert_eq!(parse_problem_type("function"), Some(ProblemType::Function));
         assert_eq!(parse_source("moved"), Some(ProblemSource::Moved));
         assert_eq!(parse_source("改编"), Some(ProblemSource::Adapted));
     }

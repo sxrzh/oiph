@@ -641,8 +641,11 @@ fn run_export_cmd(cli: &Cli, cmd: &ExportCmd) -> Result<()> {
     match cmd {
         ExportCmd::Lemon { output } => {
             let out = output.as_deref().map(Path::new);
-            let path = export_lemon::export(&cdir, out)?;
+            let (path, warnings) = export_lemon::export(&cdir, out)?;
             println!("已导出到 {}", path.display());
+            for w in &warnings {
+                println!("警告：{w}");
+            }
             Ok(())
         }
     }
@@ -1197,10 +1200,9 @@ fn parse_type_arg(s: &str) -> Option<model::ProblemType> {
     let t = s.to_lowercase();
     Some(match t.as_str() {
         "traditional" | "传统" => model::ProblemType::Traditional,
-        "interactive_lib" | "函数交互" => model::ProblemType::InteractiveLib,
+        "interactive_lib" | "函数交互" | "function" | "函数题" => model::ProblemType::Function,
         "interactive_io" | "io交互" => model::ProblemType::InteractiveIO,
         "answer_only" | "提交答案" => model::ProblemType::AnswerOnly,
-        "function" | "函数题" => model::ProblemType::Function,
         _ => return None,
     })
 }
@@ -1406,7 +1408,8 @@ mod tests {
     #[test]
     fn parse_type_arg_works() {
         assert_eq!(parse_type_arg("traditional"), Some(model::ProblemType::Traditional));
-        assert_eq!(parse_type_arg("函数交互"), Some(model::ProblemType::InteractiveLib));
+        assert_eq!(parse_type_arg("函数交互"), Some(model::ProblemType::Function));
+        assert_eq!(parse_type_arg("interactive_lib"), Some(model::ProblemType::Function));
         assert_eq!(parse_type_arg("nope"), None);
     }
 

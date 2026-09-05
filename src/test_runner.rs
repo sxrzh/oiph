@@ -340,7 +340,7 @@ fn compile_std(problem: &Problem, pdir: &Path, tmp: &Path, report: &mut TestRepo
         ProblemType::AnswerOnly => {
             report.ok("提交答案题：无 std，跳过编译");
         }
-        ProblemType::InteractiveLib | ProblemType::Function => {
+        ProblemType::Function => {
             if !std_path.exists() {
                 report.err(format!("std 文件不存在：{std_src}"));
                 return;
@@ -708,10 +708,7 @@ fn run_sols(
     let checker = tmp.join("checker");
     let aux_dir = pdir.join("auxiliary");
     let io_interactive = problem.problem_type == ProblemType::InteractiveIO;
-    let with_lib = matches!(
-        problem.problem_type,
-        ProblemType::InteractiveLib | ProblemType::Function
-    );
+    let with_lib = problem.problem_type == ProblemType::Function;
 
     for sol in &problem.sols {
         let sol_name = &sol.name;

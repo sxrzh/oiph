@@ -425,7 +425,11 @@ async fn export_lemon(
     })
     .await
     {
-        Ok(Ok(path)) => Json(json!({ "ok": true, "path": path.display().to_string() })),
+        Ok(Ok((path, warnings))) => Json(json!({
+            "ok": true,
+            "path": path.display().to_string(),
+            "warnings": warnings,
+        })),
         Ok(Err(e)) => Json(json!({ "error": format!("{e:#}") })),
         Err(e) => Json(json!({ "error": format!("导出任务失败：{e}") })),
     }

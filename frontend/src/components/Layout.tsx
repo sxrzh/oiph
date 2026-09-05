@@ -11,7 +11,15 @@ export function MenuBar({ onTestDone }: { onTestDone: () => void }) {
         setExporting(true);
         try {
           const r = await exportLemon();
-          r.ok ? swAlert('导出成功', `已导出到 ${r.path}`) : swAlert('导出失败', r.error);
+          if (r.ok) {
+            const warns: string[] = r.warnings ?? [];
+            swAlert(
+              '导出成功',
+              `已导出到 ${r.path}` + (warns.length ? `\n\n警告：\n${warns.join('\n')}` : ''),
+            );
+          } else {
+            swAlert('导出失败', r.error ?? '未知错误');
+          }
         } finally {
           setExporting(false);
         }

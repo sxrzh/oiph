@@ -13,13 +13,14 @@ use serde::{Deserialize, Serialize};
 pub enum ProblemType {
     #[default]
     Traditional,
-    InteractiveLib,
+    /// 函数交互题（原 interactive_lib 类型已合并，读取配置时兼容旧名）
+    #[serde(alias = "interactive_lib")]
+    Function,
     /// serde 名修正为 interactive_io（snake_case 会得到 interactive_i_o），
     /// alias 兼容旧文件
     #[serde(rename = "interactive_io", alias = "interactive_i_o")]
     InteractiveIO,
     AnswerOnly,
-    Function,
 }
 
 
@@ -27,10 +28,9 @@ impl ProblemType {
     pub fn label(&self) -> &'static str {
         match self {
             Self::Traditional => "传统题",
-            Self::InteractiveLib => "函数交互",
+            Self::Function => "函数交互题",
             Self::InteractiveIO => "IO 交互",
             Self::AnswerOnly => "提交答案",
-            Self::Function => "函数题",
         }
     }
 }
@@ -406,6 +406,9 @@ pub struct Problem {
     pub last_tested: Option<DateTime<Utc>>,
     #[serde(default)]
     pub files: ProblemFiles,
+    /// 新建题目时创建的骨架文件列表（相对题目目录；运行时字段，不序列化）。
+    #[serde(skip, default)]
+    pub created_files: Vec<String>,
 }
 
 impl Problem {
@@ -482,6 +485,7 @@ impl Default for Problem {
             duplicate_check: None,
             last_tested: None,
             files: ProblemFiles::default(),
+            created_files: Vec::new(),
         }
     }
 }
@@ -661,6 +665,22 @@ mod tests {
         assert_eq!(q.sols.len(), 1);
         assert_eq!(q.sols[0].expected.verdict, Verdict::Wa);
         assert!(q.statement.is_terminal_ok());
+    }
+
+    #[test]
+    fn problem_type_interactive_lib_alias() {
+        // 旧配置中的 interactive_lib 兼容读取为 Function；序列化为 function
+        let p: Problem =
+            serde_yaml::from_str("id: a\nproblem_type: interactive_lib\n").unwrap();
+        assert_eq!(p.problem_type, ProblemType::Function);
+        let p2: Problem =
+            serde_yaml::from_str("id: a\nproblem_type: function\n").unwrap();
+        assert_eq!(p2.problem_type, ProblemType::Function);
+        assert_eq!(
+            serde_yaml::to_string(&ProblemType::Function).unwrap().trim(),
+            "function"
+        );
+        assert_eq!(ProblemType::Function.label(), "函数交互题");
     }
 
     #[test]

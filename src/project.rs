@@ -129,17 +129,51 @@ pub fn add_problem(contest_dir: &Path, req: NewProblem) -> Result<Problem> {
         "statement/down",
         "data",
         "auxiliary",
+        "tutorial",
         "solutions",
     ] {
         std::fs::create_dir_all(pdir.join(sub))
             .with_context(|| format!("创建 {} 失败", sub))?;
     }
     // auxiliary/testlib.h（原版，来自 ~/.oiph/vendor/testlib.h）
-    let testlib_dst = pdir.join("auxiliary").join("testlib.h");
+    let aux_dir = pdir.join("auxiliary");
+    let testlib_dst = aux_dir.join("testlib.h");
     let testlib_src = crate::paths::vendor_read("testlib.h")?;
     std::fs::write(&testlib_dst, testlib_src.as_bytes())
         .with_context(|| format!("写入 {} 失败", testlib_dst.display()))?;
+    // auxiliary 骨架文件（内容留空，由 agent 填充）
+    let mut created: Vec<String> = Vec::new();
+    for name in ["generator.cpp", "checker.cpp", "validator.cpp"] {
+        let f = aux_dir.join(name);
+        std::fs::write(&f, "")
+            .with_context(|| format!("写入 {} 失败", f.display()))?;
+        created.push(format!("auxiliary/{name}"));
+    }
+    // 交互题：interactive_lib.cpp
+    if matches!(
+        problem.problem_type,
+        ProblemType::Function | ProblemType::InteractiveIO
+    ) {
+        let f = aux_dir.join("interactive_lib.cpp");
+        std::fs::write(&f, "")
+            .with_context(|| format!("写入 {} 失败", f.display()))?;
+        created.push("auxiliary/interactive_lib.cpp".into());
+    }
+    // 函数交互题：额外加 <题目ID>.h
+    if problem.problem_type == ProblemType::Function {
+        let f = aux_dir.join(format!("{pid}.h"));
+        std::fs::write(&f, "")
+            .with_context(|| format!("写入 {} 失败", f.display()))?;
+        created.push(format!("auxiliary/{pid}.h"));
+    }
+    // 题面与题解骨架
+    for f in ["statement/zh_cn.md", "tutorial/zh_cn.md"] {
+        std::fs::write(pdir.join(f), "")
+            .with_context(|| format!("写入 {f} 失败"))?;
+        created.push(f.to_string());
+    }
     // subtasks 与 data_gen 在 problem config.yaml 中（subtasks 默认空列表）
+    problem.created_files = created;
     save_problem(&pdir, &problem)?;
 
     // 更新比赛 problem 列表
@@ -565,9 +599,19 @@ mod tests {
         assert!(d.join("a").join("data").is_dir());
         assert!(!d.join("a").join("data").join("config.yaml").exists()); // subtasks 在题目 config.yaml 中
         assert!(d.join("a").join("auxiliary").is_dir());
+        assert!(d.join("a").join("tutorial").is_dir());
         assert!(d.join("a").join("solutions").is_dir());
         // auxiliary/testlib.h（来自 vendor）
         assert!(d.join("a").join("auxiliary").join("testlib.h").is_file());
+        // auxiliary 骨架文件（内容留空）
+        for name in ["generator.cpp", "checker.cpp", "validator.cpp"] {
+            let f = d.join("a").join("auxiliary").join(name);
+            assert!(f.is_file(), "缺少 {name}");
+            assert!(std::fs::read_to_string(&f).unwrap().is_empty());
+        }
+        // 传统题：无 interactive_lib.cpp / <pid>.h
+        assert!(!d.join("a").join("auxiliary").join("interactive_lib.cpp").exists());
+        assert!(!d.join("a").join("auxiliary").join("a.h").exists());
         // subtasks 与 data_gen 在题目 config.yaml 中
         let loaded_p = load_problem(&d.join("a")).unwrap();
         assert!(loaded_p.subtasks.is_empty());
@@ -582,7 +626,45 @@ mod tests {
     }
 
     #[test]
+    fn add_problem_interactive_skeleton() {
+        let _home = crate::paths::tests::sandbox_home_with_vendor("addprob_inter");
+        let d = tmp_dir("addprob_inter");
+        init_contest(&d, "c").unwrap();
+        // 函数交互题（interactive_lib）：interactive_lib.cpp + <pid>.h
+        add_problem(
+            &d,
+            NewProblem {
+                id: "f",
+                name: None,
+                problem_type: Some(ProblemType::Function),
+                source: None,
+            },
+        )
+        .unwrap();
+        let aux = d.join("f").join("auxiliary");
+        assert!(aux.join("interactive_lib.cpp").is_file());
+        assert!(aux.join("f.h").is_file());
+        // IO 交互题：只有 interactive_lib.cpp，无 .h
+        add_problem(
+            &d,
+            NewProblem {
+                id: "io",
+                name: None,
+                problem_type: Some(ProblemType::InteractiveIO),
+                source: None,
+            },
+        )
+        .unwrap();
+        let aux = d.join("io").join("auxiliary");
+        assert!(aux.join("interactive_lib.cpp").is_file());
+        assert!(!aux.join("io.h").exists());
+        // 传统题：两者都没有（在 add_problem_creates_layout 已验证）
+        std::fs::remove_dir_all(&d).ok();
+    }
+
+    #[test]
     fn set_component_status_persists() {
+        let _home = crate::paths::tests::sandbox_home_with_vendor("set_component_status_persists");
         let d = tmp_dir("setcomp");
         init_contest(&d, "c").unwrap();
         add_problem(
@@ -642,6 +724,7 @@ mod tests {
 
     #[test]
     fn resolve_problem_single_default() {
+        let _home = crate::paths::tests::sandbox_home_with_vendor("resolve_problem_single_default");
         let d = tmp_dir("resolve");
         init_contest(&d, "c").unwrap();
         add_problem(

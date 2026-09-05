@@ -3,6 +3,7 @@
 - 无论是什么题目，都要编写 checker，即使是标准的全文比较；
 - 在题目 config.yaml 的 **subtasks** 字段编写测试点配置（subtasks 列表，每项含 score/type/cases/pretest/sample/depend）；
 - 在题目 config.yaml 的 **data_gen** 字段编写数据生成参数：这是一个 map，key 为测试点名称（subtasks.cases 中的项），value 为 generator 的命令行参数。生成数据时，若测试点在 data_gen 的 key 中，执行 `<auxiliary/generator> <value>` 生成该测试点的输入；不在 data_gen 中的测试点视为已有静态数据。示例：`data_gen: {"1": "-small", "2": "-big", "hack": "-hack"}`。- 造数据要覆盖边界与极限情况，有梯度、有强度。用中文汇报。
+- 造完数据之后，检查一下数据有无过弱的情况（例如：在一个测试点回答多个 Yes/No 的题目中，一个测试点的答案全是 Yes 或全是 No；在输出整数的题目中，大部分题目答案都是 0），如果有，思考原因并尝试改进。
 - 对于函数交互题，需要编写 auxiliary/<题目 ID>.h 定义选手可以调用和需要选手实现的函数的原型接口（以及需要传递的类和结构体的定义），编写 auxiliary/interactive_lib.cpp 定义选手可以调用的函数的实现，interactive_lib.cpp 必须引入 <题目 ID>.h。
 - 对于 IO 交互题，编写 auxiliary/interactive_lib.cpp，使用 testlib.h 与选手程序交互：interactive_lib 从 Inf 输入测试数据中的输入数据；interactive_lib 的标准输出流会输出到选手程序的标准输入流，你需要保证每输出完一次就刷新缓冲区（例如 `std::cout << std::flush;` 或 `std::cout << std::endl;` 或 `std::fflush(stdout);`）；testlib.h 提供 tout 输出流，interactive_lib 通过 tout 输出的内容会作为最终的输出文件通过 checker 与测试数据中的答案文件比较。
 

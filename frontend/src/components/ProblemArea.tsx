@@ -102,6 +102,7 @@ function BasicInfo({ problem }: { problem: ProblemDetail }) {
   return (
     <table>
       <tbody>
+        <tr><th>题目 ID</th><td><code>{problem.id}</code></td></tr>
         <tr><th>名称</th><td>{problem.name}</td></tr>
         <tr><th>类型</th><td>{problem.problem_type}</td></tr>
         <tr><th>来源</th><td>{problem.source}</td></tr>

@@ -17,7 +17,9 @@ use crate::project;
 /// 导出当前比赛为 LemonLime 格式。
 ///
 /// `output_dir` 为 None 时默认 `<contest_dir>/<contest_name>_lemon/`。
-pub fn export(contest_dir: &Path, output_dir: Option<&Path>) -> Result<PathBuf> {
+/// 返回（输出目录，警告列表）。LemonLime 只支持函数交互题（interactive_lib / function），
+/// 遇到 IO 交互题（interactive_io）会跳过并记录警告，其他题目正常导出。
+pub fn export(contest_dir: &Path, output_dir: Option<&Path>) -> Result<(PathBuf, Vec<String>)> {
     // 导出前先检查 vendor/testlib_lemon.h 存在（SPJ 导出需要）
     let lemon_testlib = crate::paths::vendor_dir().join("testlib_lemon.h");
     anyhow::ensure!(
@@ -36,11 +38,19 @@ pub fn export(contest_dir: &Path, output_dir: Option<&Path>) -> Result<PathBuf> 
 
     let mut tasks = Vec::new();
     let mut spj_dirs: Vec<String> = Vec::new();
+    let mut warnings: Vec<String> = Vec::new();
     let source_dir = out.join("source");
     let std_dir = source_dir.join("std");
 
     for pid in &contest.problems {
         let problem = project::load_problem(&project::problem_dir(contest_dir, pid))?;
+        // LemonLime 只支持函数交互题；IO 交互题跳过并报告，其他题正常导出
+        if problem.problem_type == ProblemType::InteractiveIO {
+            warnings.push(format!(
+                "题目 {pid} 为 IO 交互题（interactive_io），LemonLime 不支持，已跳过"
+            ));
+            continue;
+        }
         let task = build_task(&problem, contest_dir, &data_dir, &std_dir, &mut spj_dirs)?;
         tasks.push(task);
     }
@@ -60,7 +70,7 @@ pub fn export(contest_dir: &Path, output_dir: Option<&Path>) -> Result<PathBuf> 
         write_compile_bat(&out, &spj_dirs)?;
     }
 
-    Ok(out)
+    Ok((out, warnings))
 }
 
 fn sanitize(name: &str) -> String {
@@ -106,11 +116,8 @@ fn build_task(
         .join("checker.cpp");
     let is_spj = has_checker && checker_path.exists();
 
-    // 判断题目类型
-    let is_interactive = matches!(
-        problem.problem_type,
-        ProblemType::InteractiveLib | ProblemType::InteractiveIO
-    );
+    // 判断题目类型（函数交互题：interactive_lib / function；IO 交互题已在 export 中跳过）
+    let is_interactive = problem.problem_type == ProblemType::Function;
 
     // comparisonMode: 1=普通比较, 4=SPJ
     let comparison_mode = if is_spj { 4 } else { 1 };
@@ -390,7 +397,8 @@ mod tests {
         );
         write_data(&dir, "a", "3", "world");
 
-        let out = export(&dir, None).unwrap();
+        let (out, warnings) = export(&dir, None).unwrap();
+        assert!(warnings.is_empty());
         assert!(out.join("test.cdf").is_file());
         assert!(out.join("data").join("a").join("1.in").is_file());
         assert!(out.join("data").join("a").join("1.ans").is_file());
@@ -446,7 +454,8 @@ mod tests {
         project::set_component_status(&dir, "b", "checker", ComponentStatus::completed_now())
             .unwrap();
 
-        let out = export(&dir, None).unwrap();
+        let (out, warnings) = export(&dir, None).unwrap();
+        assert!(warnings.is_empty());
         // SPJ 文件
         assert!(out.join("data").join("b").join("spj.cpp").is_file());
         assert!(out.join("data").join("b").join("testlib.h").is_file());
@@ -477,7 +486,7 @@ mod tests {
             project::NewProblem {
                 id: "c",
                 name: Some("C"),
-                problem_type: Some(ProblemType::InteractiveLib),
+                problem_type: Some(ProblemType::Function),
                 source: None,
             },
         )
@@ -500,7 +509,8 @@ mod tests {
         std::fs::write(pdir.join("auxiliary").join("interactive_lib.cpp"), "int main(){}").unwrap();
         std::fs::write(pdir.join("auxiliary").join(format!("c.h")), "#pragma once").unwrap();
 
-        let out = export(&dir, None).unwrap();
+        let (out, warnings) = export(&dir, None).unwrap();
+        assert!(warnings.is_empty());
         let cdf: Value = serde_json::from_str(
             &std::fs::read_to_string(out.join("inter_test.cdf")).unwrap(),
         )
@@ -511,6 +521,54 @@ mod tests {
         assert_eq!(cdf["tasks"][0]["interactorName"], "c.h");
         assert!(out.join("data").join("c").join("grader.cpp").is_file());
         assert!(out.join("data").join("c").join("c.h").is_file());
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&out).ok();
+    }
+
+    #[test]
+    fn export_skips_io_interactive_with_warning() {
+        let _home = crate::paths::tests::sandbox_home_with_vendor("lemon_io");
+        let dir = std::env::temp_dir().join(format!("prep_lemon_io_{}", uuid::Uuid::new_v4()));
+        project::init_contest(&dir, "io_test").unwrap();
+        // 传统题 a
+        make_problem(&dir, "a");
+        write_data(&dir, "a", "1", "42");
+        set_subtasks(
+            &dir,
+            "a",
+            vec![Subtask {
+                score: 100.0,
+                stype: SubtaskType::Sum,
+                cases: vec!["1".into()],
+                pretest: false,
+                sample: false,
+                depend: vec![],
+            }],
+        );
+        // IO 交互题 b
+        project::add_problem(
+            &dir,
+            project::NewProblem {
+                id: "b",
+                name: Some("B"),
+                problem_type: Some(ProblemType::InteractiveIO),
+                source: None,
+            },
+        )
+        .unwrap();
+
+        let (out, warnings) = export(&dir, None).unwrap();
+        assert_eq!(warnings.len(), 1);
+        assert!(warnings[0].contains("b") && warnings[0].contains("IO 交互"));
+        // 其他题正常导出
+        let cdf: Value = serde_json::from_str(
+            &std::fs::read_to_string(out.join("io_test.cdf")).unwrap(),
+        )
+        .unwrap();
+        let tasks = cdf["tasks"].as_array().unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0]["problemTitle"], "a");
 
         std::fs::remove_dir_all(&dir).ok();
         std::fs::remove_dir_all(&out).ok();

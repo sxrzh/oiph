@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow};
 use chrono::Utc;
 use serde_json::Value;
 
@@ -377,9 +377,20 @@ pub async fn run_turn(
         // per-agent 客户端（agents.json 配置了 base_url/api_key 的 agent），否则全局
         let role_name = prompts::role_name(role);
         let client = app.client_for(role_name).unwrap_or_else(|| app.client.clone());
+        let settings = app.settings_for(role_name);
+
+        // 上下文长度检查：有效上下文（应用压缩历史后）超过 max_context 时
+        // 先调用 compactor 压缩，再继续本步模型调用
+        let est_ctx = crate::session::apply_compaction(messages)
+            .iter()
+            .map(crate::client::estimate_message_tokens)
+            .sum::<f64>() as u64;
+        if est_ctx > settings.max_context {
+            compact_context(deps, app, messages, cancel, progress_tx).await?;
+        }
 
         let result = match client
-            .chat_stream(deps.model, messages, &tool_defs, cancel, on_content, on_reasoning)
+            .chat_stream(deps.model, messages, &tool_defs, cancel, on_content, on_reasoning, settings.reasoning)
             .await
         {
             Ok(r) => {
@@ -428,13 +439,17 @@ pub async fn run_turn(
 
         // 每步结束后实时显示累计用量（CLI 终端打印；GUI 走 usage_turn 增量消息）
         if let Some(acc) = &total_usage {
-            term::println_err(&crate::client::format_usage(acc));
+            let cost = settings.pricing.estimate(acc, deps.model);
+            term::println_err(&crate::client::format_usage_cost(acc, cost.as_ref()));
             if role == Role::Supervisor {
-                let u = serde_json::json!({
+                let mut u = serde_json::json!({
                     "input": acc.prompt_tokens,
                     "output": acc.completion_tokens,
                     "cache_hit_tokens": acc.cache_hit_tokens,
                 });
+                if let Some(c) = &cost {
+                    u["cost"] = serde_json::json!({ "currency": c.currency, "amount": c.amount });
+                }
                 term::send_usage_turn(&u.to_string());
             }
         }
@@ -527,7 +542,7 @@ pub async fn run_turn(
                 args_summary(&args)
             };
             term::println_err(&format!("工具调用：{name}({args_disp})"));
-            term::send_tool_call(name, &args);
+            let tool_msg_id = term::send_tool_call(name, &args);
             term::send_step_boundary(prompts::role_name(role));
             // 工具执行前捕获工作区快照（供 /undo 回滚；仅 supervisor，
             // 快照点需与 supervisor 对话消息数对应）
@@ -556,7 +571,7 @@ pub async fn run_turn(
                 }
             };
             let _ = tool_name_for_wait;
-            term::send_tool_result(&dispatch_result);
+            term::send_tool_result_id(tool_msg_id, &dispatch_result);
             let res_disp = if full {
                 dispatch_result.clone()
             } else {
@@ -576,6 +591,71 @@ pub async fn run_turn(
     }
 
     anyhow::bail!("达到最大步数 {}，任务未完成", deps.max_steps);
+}
+
+/// 上下文压缩：调用 compactor 模型把当前对话压缩为摘要。
+///
+/// 流程：把之前的所有对话（不含 system/compaction 消息）连同压缩提示词发给
+/// compactor；将摘要以 `role: "compaction"` 消息追加到 session（增量保存可见
+/// 完整历史）；随后应用压缩变换（丢弃 compaction 之前的非 system 内容、摘要
+/// 并入 system），相当于重新加载 session，本回合继续使用压缩后的上下文。
+async fn compact_context(
+    deps: &AgentDeps<'_>,
+    app: &App,
+    messages: &mut Vec<Message>,
+    cancel: &CancelFlag,
+    progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<Vec<Message>>>,
+) -> Result<()> {
+    let client = app
+        .client_for(crate::config::COMPACTOR)
+        .or_else(|| app.client_for("supervisor"))
+        .unwrap_or_else(|| app.client.clone());
+    let compactor_settings = app.settings_for(crate::config::COMPACTOR);
+    let prompt = app.compactor_prompt();
+
+    let mut cmsgs: Vec<Message> = messages
+        .iter()
+        .filter(|m| m.role != "system" && m.role != "compaction")
+        .cloned()
+        .collect();
+    cmsgs.push(Message::user(prompt));
+
+    term::println_err(&format!(
+        "上下文超过 max_context（约 {} tokens），正在调用 compactor 压缩…",
+        messages.iter().map(crate::client::estimate_message_tokens).sum::<f64>() as u64
+    ));
+    let result = client
+        .chat_stream(deps.model, &cmsgs, &[], cancel, term::noop, term::noop, compactor_settings.reasoning)
+        .await
+        .context("上下文压缩失败")?;
+    anyhow::ensure!(!result.interrupted, "上下文压缩被中止");
+    let summary = result.message.content.unwrap_or_default();
+    anyhow::ensure!(!summary.trim().is_empty(), "compactor 返回空摘要");
+
+    // 摘要以 compaction 消息追加到 session（先落盘完整历史，供重新加载时应用压缩）
+    messages.push(Message {
+        role: "compaction".into(),
+        content: Some(summary),
+        tool_calls: None,
+        tool_call_id: None,
+        reasoning: None,
+    });
+    if let Some(tx) = progress_tx {
+        let _ = tx.send(messages.clone());
+    }
+
+    // 重新加载语义：应用压缩变换（丢弃 compaction 之前的非 system 内容，
+    // 摘要并入 system），后续对话在压缩后的上下文上继续
+    let before = messages.len();
+    crate::session::apply_compaction_in_place(messages);
+    if let Some(tx) = progress_tx {
+        let _ = tx.send(messages.clone());
+    }
+    term::println_err(&format!(
+        "上下文压缩完成：{before} 条消息 → {} 条",
+        messages.len()
+    ));
+    Ok(())
 }
 
 fn args_summary(args: &Value) -> String {
@@ -1266,6 +1346,8 @@ mod tests {
 
     #[tokio::test]
     async fn project_tools_work_end_to_end() {
+        // add_problem 等需要 vendor/testlib.h：沙盒 HOME
+        let _home = crate::paths::tests::sandbox_home_with_vendor("agent_e2e");
         let root = std::env::temp_dir().join(format!("preparer_test_agent_{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&root).unwrap();
         let app = test_app(root.clone());

@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState, useCallback } from 'react';
 import { getContest, getProblem, getSessions, switchSession } from './api';
 import type { ContestData, ProblemDetail, SessionInfo } from './types';
-import type { UsageParts, WsMessage } from './api';
+import type { CostParts, UsageParts, WsMessage } from './api';
 import { zeroUsage } from './api';
 import { MenuBar, StatusBar } from './components/Layout';
 import { ProblemArea } from './components/ProblemArea';
@@ -15,6 +15,11 @@ interface DisplayMessage {
   content: string;
   toolCalls?: string;
   agent?: string;
+  /** 运行中的工具调用：配对 id + 开始时间（用于"已运行 x 秒"提示） */
+  toolId?: number;
+  running?: boolean;
+  startedAt?: number;
+  toolName?: string;
 }
 
 interface ChildSession {
@@ -38,6 +43,9 @@ export default function App() {
   const [usageBase, setUsageBase] = useState<UsageParts>(zeroUsage());
   const [usageTurn, setUsageTurn] = useState<UsageParts>(zeroUsage());
   const [usageLive, setUsageLive] = useState<{ input: number; output: number }>({ input: 0, output: 0 });
+  // 累计费用（基线 + 回合精确；流估算不计费）
+  const [costBase, setCostBase] = useState<CostParts | null>(null);
+  const [costTurn, setCostTurn] = useState<CostParts | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
   const currentMsgRef = useRef<DisplayMessage | null>(null);
   const currentAgentRef = useRef<string>('supervisor');
@@ -80,7 +88,10 @@ export default function App() {
       .filter((m: any) => m.role !== 'system')
       .map((m: any) => ({
         role: m.role,
-        content: m.content || '',
+        content:
+          m.role === 'compaction'
+            ? `🔄 上下文已压缩\n\n${m.content || ''}`
+            : m.content || '',
         toolCalls: m.tool_calls?.map((tc: any) => `[${tc.function.name}(${tc.function.arguments})]`).join('\n'),
       }));
 
@@ -96,6 +107,8 @@ export default function App() {
       });
       setUsageTurn(zeroUsage());
       setUsageLive({ input: 0, output: 0 });
+      setCostBase(rawUsage.cost ?? null);
+      setCostTurn(null);
     }
   };
 
@@ -159,12 +172,26 @@ export default function App() {
       currentMsgRef.current.content += msg.text;
       scheduleFlush();
     } else if (msg.type === 'tool_call') {
-      const { name, args } = msg as any;
+      const { id, name, args } = msg as any;
       currentMsgRef.current = null;
-      setMessages(m => [...m, { role: 'tool', content: `工具调用：${name}(${JSON.stringify(args, null, 2)})` }]);
+      setMessages(m => [...m, {
+        role: 'tool',
+        content: `工具调用：${name}(${JSON.stringify(args, null, 2)})`,
+        toolId: id,
+        running: true,
+        startedAt: Date.now(),
+        toolName: name,
+      }]);
     } else if (msg.type === 'tool_result') {
+      const { id, text } = msg as any;
       currentMsgRef.current = null;
-      setMessages(m => [...m, { role: 'tool', content: (msg as any).text }]);
+      setMessages(m => {
+        // 有配对 id：结束对应工具的运行提示（不追加消息，稍后与结果合并显示）
+        const next = id != null
+          ? m.map(d => (d.toolId === id ? { ...d, running: false } : d))
+          : m;
+        return [...next, { role: 'tool', content: text }];
+      });
     } else if (msg.type === 'step_boundary') {
       currentAgentRef.current = (msg as any).agent || 'supervisor';
       currentMsgRef.current = null;
@@ -185,6 +212,8 @@ export default function App() {
       });
       setUsageTurn(zeroUsage());
       setUsageLive({ input: 0, output: 0 });
+      setCostBase(u.cost ?? null);
+      setCostTurn(null);
     } else if (msg.type === 'usage_turn') {
       // 本回合精确累计（基线之上）
       const u = (msg as any).usage;
@@ -194,6 +223,7 @@ export default function App() {
         hit: u.cache_hit_tokens ?? 0,
       });
       setUsageLive({ input: 0, output: 0 });
+      setCostTurn(u.cost ?? null);
     } else if (msg.type === 'usage_live') {
       setUsageLive({ input: (msg as any).input ?? 0, output: (msg as any).output ?? 0 });
     } else if (msg.type === 'log') {
@@ -226,7 +256,8 @@ export default function App() {
   const handleSend = (text: string) => {
     setMessages(m => [...m, { role: 'user', content: text }]);
     setStreaming(true);
-    setUsageTurn(zeroUsage());
+    // 用量不在这里清零：本回合/上一回合的精确用量会在全局基线（usage 消息）
+    // 到达时并入基线并清空，保证统计只增不减
     setUsageLive({ input: 0, output: 0 });
     wsRef.current?.send(JSON.stringify({ type: 'chat', text }));
   };
@@ -308,6 +339,12 @@ export default function App() {
           input: usageBase.input + usageTurn.input + usageLive.input,
           output: usageBase.output + usageTurn.output + usageLive.output,
           hit: usageBase.hit + usageTurn.hit,
+          cost: (costBase || costTurn)
+            ? {
+                currency: (costTurn ?? costBase)!.currency,
+                amount: (costBase?.amount ?? 0) + (costTurn?.amount ?? 0),
+              }
+            : null,
         }}
       />
     </div>

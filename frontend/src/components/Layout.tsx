@@ -41,7 +41,7 @@ export function StatusBar({
   usage,
 }: {
   path: string;
-  usage: { input: number; output: number; hit: number };
+  usage: { input: number; output: number; hit: number; cost?: { currency: string; amount: number } | null };
 }) {
   const input = usage.input;
   let text = `输入 ${input}`;
@@ -50,6 +50,9 @@ export function StatusBar({
     text += `(缓存命中 ${pct.toFixed(1)}%)`;
   }
   text += ` / 输出 ${usage.output}`;
+  if (usage.cost && usage.cost.amount > 0) {
+    text += ` / 花费 ${usage.cost.currency}${usage.cost.amount.toFixed(4)}`;
+  }
   return (
     <div className="statusbar">
       <span>{path}</span>

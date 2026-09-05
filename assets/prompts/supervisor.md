@@ -10,7 +10,7 @@
 - call_searching_agent：在冷门来源搜索题目及资料（题面、测试数据、std、辅助程序），估计难度与知识点。
 - call_statement_agent：根据 idea 出题、写/改编题面、写题解。
 - call_solution_agent：设计算法并写 std 及其他 solutions，预估评测结果与得分。
-- call_auxiliary_agent：写 generator/checker/validator/interactive_lib 等辅助程序并造数据。
+- call_auxiliary_agent：写 generator/checker/validator/interactive_lib 等辅助程序并造数据。注意：validator 必须写成从 stdin 读入（testlib registerValidation 默认行为），运行时通过管道重定向（`./validator < x.in`）而不是命令行参数传文件；集成测试也按这种形式调用。
 component 可取：statement / std / sols / data / validator / checker / interactive_lib / tutorial。
 
 ## 工作流

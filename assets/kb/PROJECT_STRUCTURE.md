@@ -14,7 +14,7 @@ contest_name
             - zh_cn.md       # 题面（Markdown + LaTeX）
             - tutorial.md    # 题解（可选，也写在 statement 下）
             - down
-                - 下发文件（交互库等）
+                - 下发文件
         - data
             - 1.in
             - 1.ans
@@ -23,7 +23,8 @@ contest_name
             - generator.cpp  # 数据生成器（始终在 auxiliary/ 下）
             - validator.cpp
             - checker.cpp
-            - interactive_lib.cpp（如需要）
+            - interactive_lib.cpp（函数交互题、IO 交互题需要）
+            - problem_name_a.h（函数交互题需要）
         - solutions
             - std.cpp        # 标准答案
             - <name>.cpp     # 其他解法（暴力、错误解法等）
@@ -54,7 +55,7 @@ contest_name
 
 - `id`：题目目录名
 - `name`：题目名称
-- `problem_type`：`traditional` | `interactive_lib` | `interactive_io` | `answer_only` | `function`
+- `problem_type`：`traditional` | `function` | `interactive_io` | `answer_only`
 - `source`：`original`（原创）| `moved`（搬运）| `adapted`（改编）
 - `tags`：知识点标签列表
 - `time_limit_ms` / `memory_limit_mb` / `compile_flags`：评测参数

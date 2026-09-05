@@ -95,6 +95,15 @@ struct ChatRequest<'a> {
     stream: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     stream_options: Option<StreamOptions>,
+    /// 思考模式开关（GLM 风格 API：{"thinking": {"type": "enabled"}}）。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking: Option<ThinkingConfig>,
+}
+
+#[derive(Debug, Serialize)]
+struct ThinkingConfig {
+    #[serde(rename = "type")]
+    kind: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -121,12 +130,12 @@ pub struct ChatResult {
 }
 
 /// 粗略 token 估算：CJK 字符约 0.6 token/字，其他约 0.25 token/字符。
-fn is_cjk(c: char) -> bool {
+pub fn is_cjk(c: char) -> bool {
     matches!(c as u32,
         0x4E00..=0x9FFF | 0x3400..=0x4DBF | 0x3000..=0x303F | 0xFF00..=0xFFEF)
 }
 
-fn estimate_text_tokens(text: &str) -> f64 {
+pub fn estimate_text_tokens(text: &str) -> f64 {
     let mut cjk = 0usize;
     let mut other = 0usize;
     for c in text.chars() {
@@ -135,7 +144,7 @@ fn estimate_text_tokens(text: &str) -> f64 {
     cjk as f64 * 0.6 + other as f64 * 0.25
 }
 
-fn estimate_message_tokens(m: &Message) -> f64 {
+pub fn estimate_message_tokens(m: &Message) -> f64 {
     let mut n = 8.0; // 每条消息固定开销
     if let Some(c) = &m.content {
         n += estimate_text_tokens(c);
@@ -237,6 +246,8 @@ impl Client {
     /// 流式调用 chat/completions。支持指数退避重试、Token 用量、双 Esc 打断。
     ///
     /// `on_content` 回调在每个 content delta 到达时被调用（用于实时打印）。
+    /// `thinking`：Some(true)/Some(false) 显式开启/关闭思考模式，None 不发送该参数。
+    #[allow(clippy::too_many_arguments)]
     pub async fn chat_stream(
         &self,
         model: &str,
@@ -245,6 +256,7 @@ impl Client {
         cancel: &CancelFlag,
         on_content: fn(&str),
         on_reasoning: fn(&str),
+        thinking: Option<bool>,
     ) -> Result<ChatResult> {
         let url = format!("{}/chat/completions", self.base_url.trim_end_matches('/'));
         let body = ChatRequest {
@@ -253,6 +265,9 @@ impl Client {
             tools,
             stream: true,
             stream_options: Some(StreamOptions { include_usage: true }),
+            thinking: thinking.map(|on| ThinkingConfig {
+                kind: if on { "enabled".into() } else { "disabled".into() },
+            }),
         };
 
         // Phase 1: 发送请求（含重试）
@@ -497,8 +512,13 @@ impl Client {
 // ---------------------------------------------------------------------------
 
 /// 格式化用量摘要：`输入 <input>(缓存命中 <hit/input*100>%) / 输出 <output>`。
-/// 无缓存命中时省略括号部分。
+/// 无缓存命中时省略括号部分；有计价结果时追加 ` / 花费 <currency><amount>`。
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn format_usage(usage: &ChatUsage) -> String {
+    format_usage_cost(usage, None)
+}
+
+pub fn format_usage_cost(usage: &ChatUsage, cost: Option<&crate::pricing::Cost>) -> String {
     let input = usage.prompt_tokens;
     let mut out = format!("输入 {input}");
     if let Some(hit) = usage.cache_hit_tokens
@@ -508,6 +528,9 @@ pub fn format_usage(usage: &ChatUsage) -> String {
         out.push_str(&format!("(缓存命中 {:.1}%)", pct));
     }
     out.push_str(&format!(" / 输出 {}", usage.completion_tokens));
+    if let Some(c) = cost {
+        out.push_str(&format!(" / 花费 {}{:.4}", c.currency, c.amount));
+    }
     out
 }
 

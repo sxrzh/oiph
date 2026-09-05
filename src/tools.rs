@@ -485,8 +485,10 @@ async fn get_testlib(ctx: &ToolContext, args: &Value) -> Result<String> {
         && !parent.as_os_str().is_empty() {
             tokio::fs::create_dir_all(parent).await?;
         }
-    tokio::fs::write(&p, assets::TESTLIB_H).await?;
-    Ok(format!("已写入 testlib.h（{} 字节）到 {rel}", assets::TESTLIB_H.len()))
+    // 使用 ~/.oiph/vendor/testlib.h（启动时已检查存在）
+    let content = crate::paths::vendor_read("testlib.h")?;
+    tokio::fs::write(&p, content.as_bytes()).await?;
+    Ok(format!("已写入 testlib.h（{} 字节）到 {rel}", content.len()))
 }
 
 async fn get_checker(ctx: &ToolContext, args: &Value) -> Result<String> {
@@ -617,6 +619,7 @@ mod tests {
 
     #[tokio::test]
     async fn get_testlib_writes_file() {
+        let _home = crate::paths::tests::sandbox_home_with_vendor("get_testlib");
         let ctx = test_ctx();
         let _ = std::fs::remove_file(ctx.workdir.join("testlib.h"));
         let out = dispatch_base(&ctx, "get_testlib", &json!({}))

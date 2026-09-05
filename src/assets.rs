@@ -6,11 +6,9 @@
 //!
 //! KB_DOCS 和 BUILTIN_SKILLS 由 build.rs 自动扫描 assets/kb/ 和 assets/skills/
 //! 生成，添加文件无需修改代码。
-
-pub const TESTLIB_H: &str = include_str!("../assets/auxiliary/testlib.h");
-
-/// LemonLime 兼容的 testlib.h（含 `TESTLIB_FOR_LEMONS` 定义）。
-pub const LEMON_TESTLIB_H: &str = include_str!("../assets/lemon/testlib.h");
+//!
+//! testlib.h 不再嵌入二进制：由 init.sh 安装到 ~/.oiph/vendor/，运行时从
+//! vendor 读取（见 paths::vendor_read）。
 
 pub const CHECKER_NAMES: &[&str] = &[
     "acmp", "caseicmp", "casencmp", "casewcmp", "dcmp", "fcmp", "hcmp",
@@ -48,12 +46,6 @@ pub fn checker_source(name: &str) -> Option<&'static str> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn testlib_is_nonempty() {
-        assert!(TESTLIB_H.len() > 1000);
-        assert!(TESTLIB_H.contains("testlib.h"));
-    }
 
     #[test]
     fn all_checkers_resolvable() {

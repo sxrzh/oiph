@@ -29,6 +29,10 @@ pub struct App {
     prompts: Mutex<AgentPrompts>,
     /// per-agent 客户端（agents.json 中配置了 base_url/api_key 的 agent）。
     agent_clients: Mutex<HashMap<String, Client>>,
+    /// per-agent 运行设置（reasoning / max_context / pricing）。
+    agent_settings: Mutex<HashMap<String, crate::config::AgentSettings>>,
+    /// compactor 的压缩提示词（未配置时为内置默认）。
+    compactor_prompt: Mutex<String>,
     /// 工作区快照：undo 栈（每步工具执行前的 tree hash + 对话消息数）。
     undo_stack: Mutex<Vec<crate::snapshot::SnapshotPoint>>,
     /// 工作区快照：redo 栈（undo 时保存的当前状态）。
@@ -60,6 +64,8 @@ impl App {
             client,
             prompts: Mutex::new(AgentPrompts::default()),
             agent_clients: Mutex::new(HashMap::new()),
+            agent_settings: Mutex::new(HashMap::new()),
+            compactor_prompt: Mutex::new(crate::config::DEFAULT_COMPACTOR_PROMPT.to_string()),
             undo_stack: Mutex::new(Vec::new()),
             redo_stack: Mutex::new(Vec::new()),
             ask_answer: Mutex::new(None),
@@ -146,17 +152,25 @@ impl App {
         Ok(Some(point))
     }
 
-    /// 设置 agent 提示词与 per-agent 客户端（启动时从配置加载）。
+    /// 设置 agent 提示词、per-agent 客户端与运行设置（启动时从配置加载）。
     pub fn set_agent_setup(
         &self,
         prompts: AgentPrompts,
         clients: HashMap<String, Client>,
+        settings: HashMap<String, crate::config::AgentSettings>,
+        compactor_prompt: String,
     ) {
         if let Ok(mut p) = self.prompts.lock() {
             *p = prompts;
         }
         if let Ok(mut c) = self.agent_clients.lock() {
             *c = clients;
+        }
+        if let Ok(mut s) = self.agent_settings.lock() {
+            *s = settings;
+        }
+        if let Ok(mut p) = self.compactor_prompt.lock() {
+            *p = compactor_prompt;
         }
     }
 
@@ -170,6 +184,31 @@ impl App {
                     .map(|r| p.get(r).to_string())
             })
             .unwrap_or_default()
+    }
+
+    /// compactor 的压缩提示词。
+    pub fn compactor_prompt(&self) -> String {
+        self.compactor_prompt
+            .lock()
+            .ok()
+            .map(|p| p.clone())
+            .unwrap_or_else(|| crate::config::DEFAULT_COMPACTOR_PROMPT.to_string())
+    }
+
+    /// agent 运行设置（reasoning / max_context / pricing）。
+    /// compactor 未单独配置时回退 supervisor 的设置。
+    pub fn settings_for(&self, name: &str) -> crate::config::AgentSettings {
+        if let Ok(m) = self.agent_settings.lock() {
+            if let Some(s) = m.get(name) {
+                return s.clone();
+            }
+            if name == crate::config::COMPACTOR
+                && let Some(s) = m.get("supervisor")
+            {
+                return s.clone();
+            }
+        }
+        crate::config::AgentSettings::default()
     }
 
     /// 按 agent 名取客户端（未单独配置则回退全局客户端）。

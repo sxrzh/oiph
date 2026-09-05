@@ -94,19 +94,33 @@ pub fn send_usage_live(input: u64, output: u64) {
     ));
 }
 
+/// 工具调用消息 id 计数器（配对 tool_call / tool_result 用）。
+static TOOL_MSG_ID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
 /// 工具调用结构化消息（GUI 完整显示，不截断）。
-pub fn send_tool_call(name: &str, args: &serde_json::Value) {
+/// 返回本次调用的 id，供 [`send_tool_result_id`] 配对结果。
+pub fn send_tool_call(name: &str, args: &serde_json::Value) -> u64 {
+    let id = TOOL_MSG_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     ws_send(&format!(
-        r#"{{"type":"tool_call","name":{},"args":{}}}"#,
+        r#"{{"type":"tool_call","id":{id},"name":{},"args":{}}}"#,
         serde_json::to_string(name).unwrap_or_default(),
         serde_json::to_string(args).unwrap_or_default(),
     ));
+    id
 }
 
-/// 工具结果结构化消息（GUI 完整显示，不截断）。
+/// 工具结果结构化消息（无配对 id，如快照提示）。
 pub fn send_tool_result(result: &str) {
     ws_send(&format!(
-        r#"{{"type":"tool_result","text":{}}}"#,
+        r#"{{"type":"tool_result","id":null,"text":{}}}"#,
+        serde_json::to_string(result).unwrap_or_default(),
+    ));
+}
+
+/// 工具结果结构化消息（带配对 id；GUI 据此结束对应工具的运行提示）。
+pub fn send_tool_result_id(id: u64, result: &str) {
+    ws_send(&format!(
+        r#"{{"type":"tool_result","id":{id},"text":{}}}"#,
         serde_json::to_string(result).unwrap_or_default(),
     ));
 }

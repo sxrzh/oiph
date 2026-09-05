@@ -18,6 +18,13 @@ use crate::project;
 ///
 /// `output_dir` 为 None 时默认 `<contest_dir>/<contest_name>_lemon/`。
 pub fn export(contest_dir: &Path, output_dir: Option<&Path>) -> Result<PathBuf> {
+    // 导出前先检查 vendor/testlib_lemon.h 存在（SPJ 导出需要）
+    let lemon_testlib = crate::paths::vendor_dir().join("testlib_lemon.h");
+    anyhow::ensure!(
+        lemon_testlib.is_file(),
+        "缺少 {}（LemonLime SPJ 导出需要），请先运行 init.sh 初始化",
+        lemon_testlib.display()
+    );
     let contest = project::load_contest(contest_dir)?;
     let out = output_dir
         .map(|p| p.to_path_buf())
@@ -118,8 +125,9 @@ fn build_task(
         let spj_src = checker_src.replace("registerTestlibCmd", "registerLemonChecker");
         std::fs::write(&spj_dst, &spj_src)
             .with_context(|| format!("写入 spj.cpp 失败：{}", spj_dst.display()))?;
-        // 拷贝 lemon 兼容的 testlib.h
-        std::fs::write(pdata_dir.join("testlib.h"), crate::assets::LEMON_TESTLIB_H)?;
+        // 拷贝 lemon 兼容的 testlib.h（~/.oiph/vendor/testlib_lemon.h，导出前已检查存在）
+        let lemon_h = crate::paths::vendor_read("testlib_lemon.h")?;
+        std::fs::write(pdata_dir.join("testlib.h"), lemon_h.as_bytes())?;
         special_judge = format!("{pid}/spj.exe");
         spj_dirs.push(pid.clone());
     }
@@ -352,6 +360,7 @@ mod tests {
 
     #[test]
     fn export_basic_contest() {
+        let _home = crate::paths::tests::sandbox_home_with_vendor("lemon_basic");
         let dir = std::env::temp_dir().join(format!("prep_lemon_{}", uuid::Uuid::new_v4()));
         make_contest(&dir);
         make_problem(&dir, "a");
@@ -413,6 +422,7 @@ mod tests {
 
     #[test]
     fn export_with_spj() {
+        let _home = crate::paths::tests::sandbox_home_with_vendor("lemon_spj");
         let dir = std::env::temp_dir().join(format!("prep_lemon_spj_{}", uuid::Uuid::new_v4()));
         make_contest(&dir);
         make_problem(&dir, "b");
@@ -459,6 +469,7 @@ mod tests {
 
     #[test]
     fn export_interactive() {
+        let _home = crate::paths::tests::sandbox_home_with_vendor("lemon_inter");
         let dir = std::env::temp_dir().join(format!("prep_lemon_inter_{}", uuid::Uuid::new_v4()));
         project::init_contest(&dir, "inter_test").unwrap();
         project::add_problem(

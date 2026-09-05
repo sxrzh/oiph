@@ -18,6 +18,7 @@ mod export_lemon;
 mod kb;
 mod model;
 mod paths;
+mod pricing;
 mod project;
 mod prompts;
 mod server;
@@ -206,7 +207,9 @@ fn run_prompt_cmd(cmd: &PromptCmd) -> Result<()> {
     match cmd {
         PromptCmd::Update { agent, file } => {
             let ac = resolve_agent(agent)?;
-            let prompt_path = config::expand_tilde(&ac.prompt);
+            let prompt_str = ac.prompt.clone()
+                .ok_or_else(|| anyhow!("agent '{agent}' 未配置提示词路径"))?;
+            let prompt_path = config::expand_tilde(&prompt_str);
             let content = std::fs::read_to_string(file)
                 .with_context(|| format!("读取 '{file}' 失败"))?;
             anyhow::ensure!(!content.trim().is_empty(), "'{file}' 内容为空");
@@ -220,7 +223,9 @@ fn run_prompt_cmd(cmd: &PromptCmd) -> Result<()> {
         }
         PromptCmd::Edit { agent, editor } => {
             let ac = resolve_agent(agent)?;
-            let prompt_path = config::expand_tilde(&ac.prompt);
+            let prompt_str = ac.prompt.clone()
+                .ok_or_else(|| anyhow!("agent '{agent}' 未配置提示词路径"))?;
+            let prompt_path = config::expand_tilde(&prompt_str);
             if let Some(parent) = prompt_path.parent() {
                 std::fs::create_dir_all(parent)?;
             }
@@ -338,6 +343,14 @@ async fn main() -> Result<()> {
     let cli = Cli::parse();
     let root = std::env::current_dir()?;
 
+    // 启动检查：vendor/testlib.h 必须存在（init.sh 初始化），否则无法继续
+    let vendor_testlib = paths::vendor_dir().join("testlib.h");
+    anyhow::ensure!(
+        vendor_testlib.is_file(),
+        "缺少 {}，请先运行 init.sh 初始化",
+        vendor_testlib.display()
+    );
+
     match &cli.command {
         Some(Commands::Cli { prompt }) => return run_cli(&cli, prompt.as_deref()).await,
         Some(Commands::Kb { cmd }) => return run_kb_cmd(&cli, cmd).await,
@@ -376,7 +389,7 @@ async fn run_gui(cli: &Cli) -> Result<()> {
         cli.max_steps,
         dup_backend,
     )?);
-    app.set_agent_setup(setup.prompts, setup.clients);
+    app.set_agent_setup(setup.prompts, setup.clients, setup.settings, setup.compactor_prompt);
     let contest_dir = resolve_contest(&app.root, cli.contest.as_deref());
     app.set_contest_dir(contest_dir);
     server::serve(app, cli.port).await
@@ -681,7 +694,7 @@ async fn run_repl(cli: &Cli, root: &Path) -> Result<()> {
         cli.max_steps,
         dup_backend,
     )?);
-    app.set_agent_setup(setup.prompts, setup.clients);
+    app.set_agent_setup(setup.prompts, setup.clients, setup.settings, setup.compactor_prompt);
 
     let contest_dir = resolve_contest(root, cli.contest.as_deref());
     app.set_contest_dir(contest_dir.clone());

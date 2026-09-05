@@ -14,6 +14,9 @@ pub enum ProblemType {
     #[default]
     Traditional,
     InteractiveLib,
+    /// serde 名修正为 interactive_io（snake_case 会得到 interactive_i_o），
+    /// alias 兼容旧文件
+    #[serde(rename = "interactive_io", alias = "interactive_i_o")]
     InteractiveIO,
     AnswerOnly,
     Function,

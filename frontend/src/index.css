@@ -160,6 +160,43 @@ body {
 .msg .role-tag { font-size: 11px; color: var(--fg-muted); margin-bottom: 2px; }
 .msg.tool { font-family: monospace; font-size: 12px; background: var(--bg-tab); }
 
+/* 运行中工具：呼吸边框 + 计时徽标动态渐变 */
+.msg.msg-running {
+  animation: toolPulse 2s ease-in-out infinite;
+}
+@keyframes toolPulse {
+  0%, 100% { box-shadow: 0 0 0 0 rgba(96, 165, 250, 0.0); }
+  50% { box-shadow: 0 0 10px 1px rgba(96, 165, 250, 0.35); }
+}
+.tool-running-badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 3px 12px;
+  border-radius: 999px;
+  color: #0b1220;
+  font-size: 12px;
+  font-weight: 600;
+  background: linear-gradient(270deg, #f472b6, #a78bfa, #60a5fa, #34d399, #fbbf24, #f472b6);
+  background-size: 500% 100%;
+  animation: toolGradient 4s linear infinite;
+}
+@keyframes toolGradient {
+  0% { background-position: 0% 50%; }
+  100% { background-position: 500% 50%; }
+}
+.tool-running-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #0b1220;
+  animation: toolBlink 1s ease-in-out infinite;
+}
+@keyframes toolBlink {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.25; }
+}
+
 .input-area {
   padding: 8px 12px;
   background: var(--bg-tab);

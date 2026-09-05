@@ -174,7 +174,46 @@ pub fn load(contest_dir: &Path, name: &str) -> Result<Session> {
     let mut session: Session = serde_json::from_str(&raw)
         .with_context(|| format!("解析 session '{name}' 失败"))?;
     repair_tool_history(&mut session.messages);
+    apply_compaction_in_place(&mut session.messages);
     Ok(session)
+}
+
+/// 应用压缩历史（就地修改）：遇到 `role: "compaction"` 消息时，丢弃其之前的
+/// 所有非 system 内容（system 保留在最前），并把 compaction 的 content 附加到
+/// system 消息末尾作为 system 的一部分。
+pub fn apply_compaction_in_place(messages: &mut Vec<Message>) {
+    *messages = apply_compaction(messages);
+}
+
+/// 压缩消息历史（返回新列表）：见 [`apply_compaction_in_place`]。
+/// 多条 compaction 消息按顺序处理，前一条的摘要已并入 system，会被后一条
+/// 保留下来（system 内容不断追加）。
+pub fn apply_compaction(messages: &[Message]) -> Vec<Message> {
+    let mut out: Vec<Message> = Vec::new();
+    for m in messages {
+        match m.role.as_str() {
+            "system" => out.push(m.clone()),
+            "compaction" => {
+                let summary = m.content.clone().unwrap_or_default();
+                // 丢弃之前的所有非 system 内容
+                out.retain(|x| x.role == "system");
+                if let Some(sys) = out.last_mut() {
+                    let mut c = sys.content.take().unwrap_or_default();
+                    if !c.trim().is_empty() {
+                        c.push_str("\n\n");
+                    }
+                    c.push_str("## 上下文压缩摘要\n\n");
+                    c.push_str(&summary);
+                    sys.content = Some(c);
+                } else {
+                    // 没有 system 消息：摘要本身作为 system
+                    out.insert(0, Message::system(format!("## 上下文压缩摘要\n\n{summary}")));
+                }
+            }
+            _ => out.push(m.clone()),
+        }
+    }
+    out
 }
 
 /// 修复不完整的 tool_calls 历史：assistant 消息中的每个 tool_call_id
@@ -214,8 +253,11 @@ pub fn load_sub(contest_dir: &Path, session_name: &str, filename: &str) -> Resul
     let p = session_dir(contest_dir, session_name).join(filename);
     let raw = std::fs::read_to_string(&p)
         .with_context(|| format!("读取子 session '{filename}' 失败"))?;
-    serde_json::from_str::<SubSession>(&raw)
-        .with_context(|| format!("解析子 session '{filename}' 失败"))
+    let mut sub: SubSession =
+        serde_json::from_str(&raw).with_context(|| format!("解析子 session '{filename}' 失败"))?;
+    repair_tool_history(&mut sub.messages);
+    apply_compaction_in_place(&mut sub.messages);
+    Ok(sub)
 }
 
 pub fn save(contest_dir: &Path, session: &Session) -> Result<()> {
@@ -519,5 +561,75 @@ mod tests {
         ];
         repair_tool_history(&mut msgs);
         assert_eq!(msgs.len(), 3);
+    }
+
+    fn compaction(content: &str) -> Message {
+        Message {
+            role: "compaction".into(),
+            content: Some(content.into()),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning: None,
+        }
+    }
+
+    #[test]
+    fn apply_compaction_drops_history_merges_into_system() {
+        let msgs = vec![
+            Message::system("系统提示"),
+            Message::user("你好"),
+            Message { role: "assistant".into(), content: Some("你好！".into()), tool_calls: None, tool_call_id: None, reasoning: None },
+            compaction("摘要：用户打了招呼"),
+            Message::user("继续"),
+        ];
+        let out = apply_compaction(&msgs);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].role, "system");
+        assert!(out[0].content.as_deref().unwrap().contains("系统提示"));
+        assert!(out[0].content.as_deref().unwrap().contains("摘要：用户打了招呼"));
+        assert_eq!(out[1].role, "user");
+        assert_eq!(out[1].content.as_deref(), Some("继续"));
+    }
+
+    #[test]
+    fn apply_compaction_without_system_creates_one() {
+        let msgs = vec![
+            Message::user("任务"),
+            compaction("摘要内容"),
+            Message::user("继续"),
+        ];
+        let out = apply_compaction(&msgs);
+        assert_eq!(out.len(), 2);
+        assert_eq!(out[0].role, "system");
+        assert!(out[0].content.as_deref().unwrap().contains("摘要内容"));
+        assert_eq!(out[1].role, "user");
+    }
+
+    #[test]
+    fn apply_compaction_multiple_keeps_latest_summary() {
+        let msgs = vec![
+            Message::system("系统"),
+            Message::user("第一轮"),
+            compaction("摘要一"),
+            Message::user("第二轮"),
+            compaction("摘要二"),
+            Message::user("第三轮"),
+        ];
+        let out = apply_compaction(&msgs);
+        assert_eq!(out.len(), 2);
+        let sys = out[0].content.as_deref().unwrap();
+        assert!(sys.contains("摘要一") && sys.contains("摘要二"), "got: {sys}");
+        assert_eq!(out[1].content.as_deref(), Some("第三轮"));
+    }
+
+    #[test]
+    fn apply_compaction_noop_without_marker() {
+        let msgs = vec![
+            Message::system("系统"),
+            Message::user("hi"),
+            Message { role: "assistant".into(), content: Some("hello".into()), tool_calls: None, tool_call_id: None, reasoning: None },
+        ];
+        let out = apply_compaction(&msgs);
+        assert_eq!(out.len(), 3);
     }
 }

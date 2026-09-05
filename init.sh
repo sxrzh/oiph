@@ -116,7 +116,26 @@ else
     echo "警告：$PROMPTS_ASSETS 不存在" >&2
 fi
 
-# 5. 生成 agents.json（已存在则不动）
+# 5. 安装 vendor（testlib.h / testlib_lemon.h，已存在跳过，--force 覆盖）
+#    运行时优先使用 ~/.oiph/vendor 中的版本，方便用户自行升级第三方固定文件
+VENDOR_DIR="$OIPH_HOME/vendor"
+if [ -f "$ASSETS_DIR/auxiliary/testlib.h" ] && [ -f "$ASSETS_DIR/lemon/testlib.h" ]; then
+    mkdir -p "$VENDOR_DIR"
+    for pair in "auxiliary/testlib.h:testlib.h" "lemon/testlib.h:testlib_lemon.h"; do
+        src="$ASSETS_DIR/${pair%%:*}"
+        dst="$VENDOR_DIR/${pair##*:}"
+        if [ -f "$dst" ] && [ "$FORCE" -eq 0 ]; then
+            echo "  vendor ${pair##*:} 已存在，跳过（--force 覆盖）"
+        else
+            cp "$src" "$dst"
+            echo "✓ 安装 vendor ${pair##*:}"
+        fi
+    done
+else
+    echo "警告：$ASSETS_DIR/auxiliary/testlib.h 或 $ASSETS_DIR/lemon/testlib.h 不存在" >&2
+fi
+
+# 6. 生成 agents.json（已存在则不动）
 if [ ! -f "$CONFIG_DIR/agents.json" ]; then
     mkdir -p "$CONFIG_DIR"
     cat > "$CONFIG_DIR/agents.json" <<EOF
@@ -125,7 +144,8 @@ if [ ! -f "$CONFIG_DIR/agents.json" ]; then
   "statement":  { "base_url": null, "api_key": null, "prompt": "$PROMPTS_DIR/statement.md" },
   "solution":   { "base_url": null, "api_key": null, "prompt": "$PROMPTS_DIR/solution.md" },
   "auxiliary":  { "base_url": null, "api_key": null, "prompt": "$PROMPTS_DIR/auxiliary.md" },
-  "searching":  { "base_url": null, "api_key": null, "prompt": "$PROMPTS_DIR/searching.md" }
+  "searching":  { "base_url": null, "api_key": null, "prompt": "$PROMPTS_DIR/searching.md" },
+  "compactor":  { "base_url": null, "api_key": null, "prompt": "$PROMPTS_DIR/compactor.md" }
 }
 EOF
     echo "✓ 生成 $CONFIG_DIR/agents.json"

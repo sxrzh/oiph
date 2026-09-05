@@ -45,10 +45,18 @@ cargo build
 ./target/debug/preparer kb add <文件> # 知识库管理
 ./target/debug/preparer session list # 会话管理
 
-# 首次使用：初始化 ~/.oiph（安装内置 skills/kb/prompts + 生成 agents.json）
+# 首次使用：初始化 ~/.oiph（安装内置 skills/kb/prompts + vendor + 生成 agents.json）
 ./init.sh                # 来源默认为仓库 assets/，可指定：./init.sh /path/to/assets
 
-# agent 配置（~/.oiph/config/agents.json：每个 agent 的 base_url / api_key / prompt）
+# vendor（~/.oiph/vendor/：testlib.h、testlib_lemon.h，init.sh 安装）
+# 运行时优先使用 vendor 中的版本（可自行升级），缺省回退内置版本
+
+# agent 配置（~/.oiph/config/agents.json：每个 agent 的 base_url / api_key / prompt，
+# 以及可选的 reasoning（思考模式）、price（固定单价 {input,hit,output,currency}，货币/M token）、
+# price-policy: "auto"（按 base_url 自动识别供应商计价，支持 DeepSeek 峰谷计价，
+# GLM 不估算费用；price 与 price-policy 都缺省时即 auto）、
+# max_context（最长上下文 token 估算，超过则自动调用 compactor 压缩，默认 1048576）。
+# 另有可选的 "compactor" 项指定上下文压缩模型与提示词，缺省回退 supervisor）
 # 提示词编辑（存于 ~/.oiph/config/prompts/<agent>.md）
 ./target/debug/preparer prompt update statement new_prompt.md  # 从文件替换
 ./target/debug/preparer prompt edit statement                  # vim 编辑（git commit 风格）

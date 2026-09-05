@@ -9,6 +9,10 @@ interface DisplayMessage {
   content: string;
   toolCalls?: string;
   agent?: string;
+  toolId?: number;
+  running?: boolean;
+  startedAt?: number;
+  toolName?: string;
 }
 
 interface ChildSession {
@@ -113,6 +117,23 @@ function ReasoningMessageView({ content, agent }: { content: string; agent?: str
   );
 }
 
+/// 运行中工具的计时徽标（动态渐变特效）。
+function RunningToolBadge({ name, startedAt }: { name: string; startedAt: number }) {
+  const [sec, setSec] = useState(() => Math.max(0, Math.floor((Date.now() - startedAt) / 1000)));
+  useEffect(() => {
+    const t = setInterval(() => {
+      setSec(Math.max(0, Math.floor((Date.now() - startedAt) / 1000)));
+    }, 1000);
+    return () => clearInterval(t);
+  }, [startedAt]);
+  return (
+    <span className="tool-running-badge">
+      <span className="tool-running-dot" />
+      ⚙ {name} · 工具已运行 {sec} 秒
+    </span>
+  );
+}
+
 function ChatMessageView({
   msg,
   child,
@@ -140,10 +161,15 @@ function ChatMessageView({
   );
 
   return (
-    <div className={`msg ${msg.role}`}>
+    <div className={`msg ${msg.role}${msg.running ? ' msg-running' : ''}`}>
       <div className="role-tag">{roleTag}</div>
       {body}
       {msg.toolCalls && <div className="tool-call" style={{ marginTop: '4px' }}>{msg.toolCalls}</div>}
+      {msg.running && msg.toolName && msg.startedAt != null && (
+        <div style={{ marginTop: '6px' }}>
+          <RunningToolBadge name={msg.toolName} startedAt={msg.startedAt} />
+        </div>
+      )}
       {child && sessionName && (
         <SubSessionSpoiler child={child} sessionName={sessionName} />
       )}

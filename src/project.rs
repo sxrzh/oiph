@@ -134,6 +134,11 @@ pub fn add_problem(contest_dir: &Path, req: NewProblem) -> Result<Problem> {
         std::fs::create_dir_all(pdir.join(sub))
             .with_context(|| format!("创建 {} 失败", sub))?;
     }
+    // auxiliary/testlib.h（原版，来自 ~/.oiph/vendor/testlib.h）
+    let testlib_dst = pdir.join("auxiliary").join("testlib.h");
+    let testlib_src = crate::paths::vendor_read("testlib.h")?;
+    std::fs::write(&testlib_dst, testlib_src.as_bytes())
+        .with_context(|| format!("写入 {} 失败", testlib_dst.display()))?;
     // subtasks 与 data_gen 在 problem config.yaml 中（subtasks 默认空列表）
     save_problem(&pdir, &problem)?;
 
@@ -540,6 +545,8 @@ mod tests {
 
     #[test]
     fn add_problem_creates_layout() {
+        // add_problem 需要 vendor/testlib.h：沙盒 HOME
+        let _home = crate::paths::tests::sandbox_home_with_vendor("addprob");
         let d = tmp_dir("addprob");
         init_contest(&d, "c").unwrap();
         let p = add_problem(
@@ -559,6 +566,8 @@ mod tests {
         assert!(!d.join("a").join("data").join("config.yaml").exists()); // subtasks 在题目 config.yaml 中
         assert!(d.join("a").join("auxiliary").is_dir());
         assert!(d.join("a").join("solutions").is_dir());
+        // auxiliary/testlib.h（来自 vendor）
+        assert!(d.join("a").join("auxiliary").join("testlib.h").is_file());
         // subtasks 与 data_gen 在题目 config.yaml 中
         let loaded_p = load_problem(&d.join("a")).unwrap();
         assert!(loaded_p.subtasks.is_empty());
@@ -566,6 +575,9 @@ mod tests {
         let loaded = load_contest(&d).unwrap();
         assert_eq!(loaded.problems, vec!["a"]);
         assert_eq!(loaded.loaded_problems.len(), 1);
+        // auxiliary/testlib.h 内容来自 vendor
+        let h = std::fs::read_to_string(d.join("a").join("auxiliary").join("testlib.h")).unwrap();
+        assert!(h.contains("vendor testlib"));
         std::fs::remove_dir_all(&d).ok();
     }
 

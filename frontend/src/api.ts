@@ -55,6 +55,11 @@ export interface UsageParts {
   hit: number;
 }
 
+export interface CostParts {
+  currency: string;
+  amount: number;
+}
+
 export const zeroUsage = (): UsageParts => ({ input: 0, output: 0, hit: 0 });
 
 export async function exportLemon(): Promise<{ ok?: boolean; path?: string; error?: string }> {
@@ -69,15 +74,15 @@ export type WsMessage =
   | { type: 'content'; text: string }
   | { type: 'reasoning'; text: string }
   | { type: 'log'; text: string }
-  | { type: 'tool_call'; name: string; args: any }
-  | { type: 'tool_result'; text: string }
+  | { type: 'tool_call'; id: number; name: string; args: any }
+  | { type: 'tool_result'; id: number | null; text: string }
   | { type: 'step_boundary'; agent?: string }
   | { type: 'snapshot_done' }
   | { type: 'ask_user'; questions: any[] }
   /** 全局累计用量基线（回合结束/连接建立/切换会话时推送），收到后清空其他两块 */
-  | { type: 'usage'; usage: { input: number; output: number; total_tokens?: number; cache_hit_tokens?: number | null } }
+  | { type: 'usage'; usage: { input: number; output: number; total_tokens?: number; cache_hit_tokens?: number | null; cost?: CostParts | null } }
   /** 本回合已完成的精确用量（turn-local 累计） */
-  | { type: 'usage_turn'; usage: { input: number; output: number; cache_hit_tokens?: number | null } }
+  | { type: 'usage_turn'; usage: { input: number; output: number; cache_hit_tokens?: number | null; cost?: CostParts | null } }
   /** 当前流式调用的增量估算 */
   | { type: 'usage_live'; input: number; output: number }
   | { type: 'done'; interrupted: boolean }

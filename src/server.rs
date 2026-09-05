@@ -18,7 +18,7 @@ use tokio::sync::{Mutex, mpsc};
 use tower_http::services::ServeDir;
 
 use crate::agent::{self, Role};
-use crate::client::Message as ChatMessage;
+use crate::client::{self as client_mod, Message as ChatMessage};
 use crate::project;
 use crate::session as session_mod;
 use crate::state::App;
@@ -56,13 +56,24 @@ fn total_usage(st: &ServerState) -> session_mod::TokenUsage {
     t
 }
 
-/// 用量转前端字段（input/output/cache_hit_tokens）。
-fn usage_to_value(u: &session_mod::TokenUsage) -> Value {
+/// 用量转前端字段（input/output/cache_hit_tokens + 可选 cost）。
+/// cost 按 supervisor 的计价策略对累计用量估算。
+fn usage_to_value(st: &ServerState, u: &session_mod::TokenUsage) -> Value {
+    let pricing = st.app.settings_for("supervisor").pricing;
+    let chat_usage = client_mod::ChatUsage {
+        prompt_tokens: u.prompt_tokens,
+        completion_tokens: u.completion_tokens,
+        total_tokens: u.total_tokens,
+        cache_hit_tokens: u.cache_hit_tokens,
+        cache_miss_tokens: u.cache_miss_tokens,
+    };
+    let cost = pricing.estimate(&chat_usage, &st.app.model);
     json!({
         "input": u.prompt_tokens,
         "output": u.completion_tokens,
         "total_tokens": u.total_tokens,
         "cache_hit_tokens": u.cache_hit_tokens,
+        "cost": cost.map(|c| json!({ "currency": c.currency, "amount": c.amount })),
     })
 }
 
@@ -384,7 +395,7 @@ async fn switch_session(
             *st.messages.lock().await = msgs;
             *st.current_session.lock().await = Some(req.name.clone());
             // 切换 session：用量基线切换为新 session 的持久化用量，清空 pending
-            let usage_json = usage_to_value(&s.usage);
+            let usage_json = usage_to_value(&st, &s.usage);
             *st.saved_usage.lock().unwrap() = s.usage.clone();
             *st.pending_usage.lock().unwrap() = Default::default();
             Json(json!({ "ok": true, "name": req.name, "messages": messages_json, "children": children_json, "usage": usage_json }))
@@ -485,7 +496,7 @@ async fn handle_ws(mut socket: WebSocket, st: Arc<ServerState>) {
         let _ = tx_out.send(
             json!({
                 "type": "usage",
-                "usage": usage_to_value(&total),
+                "usage": usage_to_value(&st, &total),
             })
             .to_string(),
         );
@@ -602,7 +613,7 @@ async fn handle_ws(mut socket: WebSocket, st: Arc<ServerState>) {
             let _ = tx_agent.send(
                 json!({
                     "type": "usage",
-                    "usage": usage_to_value(&total),
+                    "usage": usage_to_value(&st_agent, &total),
                 })
                 .to_string(),
             );
@@ -728,13 +739,24 @@ async fn save_session(st: &ServerState) {
             Err(_) => return,
         },
     };
-    // 取出本回合待保存用量，持久化后清零 pending
+    // 取出本回合待保存用量，持久化后并入内存基线（保持全局累计单调不减）
     let add_usage = {
         let mut pending = st.pending_usage.lock().unwrap();
         std::mem::take(&mut *pending)
     };
     if session_mod::save_messages(d, &name, &msgs, &add_usage).is_ok() {
-        *st.saved_usage.lock().unwrap() = total_usage(st);
+        let mut saved = st.saved_usage.lock().unwrap();
+        saved.prompt_tokens += add_usage.prompt_tokens;
+        saved.completion_tokens += add_usage.completion_tokens;
+        saved.total_tokens += add_usage.total_tokens;
+        saved.cache_hit_tokens = match (saved.cache_hit_tokens, add_usage.cache_hit_tokens) {
+            (Some(a), Some(b)) => Some(a + b),
+            (a, b) => a.or(b),
+        };
+        saved.cache_miss_tokens = match (saved.cache_miss_tokens, add_usage.cache_miss_tokens) {
+            (Some(a), Some(b)) => Some(a + b),
+            (a, b) => a.or(b),
+        };
     }
 }
 

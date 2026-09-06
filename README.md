@@ -2,9 +2,20 @@
 
 OIPH（OI Preparer Helper）是一个专为辅助信息学竞赛模拟赛组题工作全流程而设计的 Agent 工具，工作流涵盖找题/出题、造数据、写题解、验题、集成测试、打包等。
 
-## 从源码构建
+## 安装
 
-### 工具链准备
+### 一键安装
+```sh
+curl -fsSL http://sxrzh.github.io/oiph/install/latest.sh | bash
+```
+支持 x86_64 Linux, arm64 Linux, MacOS。
+
+### Docker 镜像  
+> Coming soon.
+
+### 从源码构建
+
+#### 工具链准备
 本项目主体使用 Rust 编写，前端用 Vite+React+TypeScript 构建，需要安装 Rust（1.85+）和 Node.js（18+） 工具链。参见 [安装 Rust](https://rust-lang.org/zh-CN/tools/install/) 和 [下载 Node.js®](https://nodejs.org/zh-cn/download) 或按以下步骤安装：
 
 Rust：  
@@ -29,8 +40,7 @@ node -v # Should print "v24.20.0".
 npm -v # Should print "11.19.0".
 ```
 
-### 构建 OIPH
-
+#### 构建 OIPH
 ```sh
 git clone https://github.com/sxrzh/oiph.git && cd oiph
 
@@ -242,5 +252,5 @@ OIPH 为多 Agent 系统，与用户交互的是 supervisor，它以工具调用
 
 - **安全问题**：目前没有实现沙箱、权限控制，agent 的工具可以访问到整个系统的文件，而且有可能运行从网络上抓取的代码。建议您在虚拟机或 docker 中运行 OIPH 并严格监控防止信息泄露；
 - 提交答案题的功能目前还没有得到充分测试；
-- 接入 GLM 时有时候回复输出混乱；
+- 接入 GLM 时有时候回复输出混乱；接入 DeepSeek 运行比较流畅；
 - 集成测试不检查 Subtask 配置情况。

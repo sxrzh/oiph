@@ -65,7 +65,7 @@ oiph
 ```
 浏览器访问 <http://localhost:17217> 即可打开界面。
 
-OIPH 目前只支持 OpenAI Completion 格式的 LLM API，可以在界面菜单栏的设置中为每个 agent 分别制定 endpoint 和 API-key，未设置时默认使用环境变量 `OPENAI_BASE_URL`, `OPENAI_API_KEY` 和 `OPENAI_MODEL`。
+OIPH 目前只支持 OpenAI Completion 格式的 LLM API。通过界面菜单栏的设置（或 `~/.oiph/config/agents.json`）为每个 agent 分别配置 endpoint、API key 和模型；留空时直接回退环境变量 `OPENAI_BASE_URL` / `OPENAI_API_KEY` / `OPENAI_MODEL`。
 
 ### 快速开始  
 
@@ -241,3 +241,4 @@ OIPH 为多 Agent 系统，与用户交互的是 supervisor，它以工具调用
 
 - **安全问题**：目前没有实现沙箱、权限控制，agent 的工具可以访问到整个系统的文件，而且有可能运行从网络上抓取的代码。建议您在虚拟机或 docker 中运行 OIPH 并严格监控防止信息泄露；
 - 提交答案题的功能目前还没有得到充分测试。
+- 接入 GLM 时有时候回复输出混乱。

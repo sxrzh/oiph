@@ -7,7 +7,7 @@
 #   （或先下载后执行：bash latest.sh）
 #
 # 功能：
-#   1. 检测本机架构，选择对应的发布包
+#   1. 检测本机架构，选择对应的发布包（Linux 为 musl 静态链接，无 glibc 依赖）
 #   2. 若已安装（/usr/local/bin/oiph 或 ~/.oiph 存在）则询问是否继续
 #   3. 通过 GitHub API 获取最新 release，下载合适架构的 zip 并解压
 #   4. sudo cp 安装 oiph 到 /usr/local/bin
@@ -35,8 +35,8 @@ die() { printf "${c_red}[oiph] 错误：${c_off}%s\n" "$*" >&2; exit 1; }
 OS="$(uname -s)"
 ARCH="$(uname -m)"
 case "$OS-$ARCH" in
-  Linux-x86_64 | Linux-amd64)        ASSET="oiph-x86_64-unknown-linux-gnu.zip" ;;
-  Linux-aarch64 | Linux-arm64)       ASSET="oiph-aarch64-unknown-linux-gnu.zip" ;;
+  Linux-x86_64 | Linux-amd64)        ASSET="oiph-x86_64-unknown-linux-musl.zip" ;;
+  Linux-aarch64 | Linux-arm64)       ASSET="oiph-aarch64-unknown-linux-musl.zip" ;;
   Darwin-arm64 | Darwin-aarch64)     ASSET="oiph-aarch64-apple-darwin.zip" ;;
   Darwin-x86_64 | Darwin-i386)       die "暂不支持 Intel Mac（没有对应发布包），请从源码构建：git clone https://github.com/$REPO" ;;
   *) die "不支持的系统/架构：$OS $ARCH" ;;

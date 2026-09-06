@@ -1,0 +1,83 @@
+name: release
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: build ${{ matrix.target }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-gnu
+          - target: aarch64-unknown-linux-gnu
+          - target: aarch64-apple-darwin
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 安装 Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: 构建前端（frontend/dist）
+        working-directory: frontend
+        run: npm ci && npm run build
+
+      - name: 安装 Rust 工具链
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: 安装交叉编译工具链（非原生目标）
+        if: matrix.target != 'x86_64-unknown-linux-gnu'
+        uses: taiki-e/setup-cross-toolchain-action@v1
+        with:
+          target: ${{ matrix.target }}
+
+      - name: 编译 release 二进制
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: 打包 zip（oiph + assets + frontend/dist）
+        run: |
+          mkdir -p stage
+          cp target/${{ matrix.target }}/release/oiph stage/oiph
+          cp -r assets stage/assets
+          mkdir -p stage/frontend
+          cp -r frontend/dist stage/frontend/dist
+          chmod +x stage/oiph
+          (cd stage && zip -qr ../oiph-${{ matrix.target }}.zip .)
+
+      - name: 上传产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: oiph-${{ matrix.target }}
+          path: oiph-${{ matrix.target }}.zip
+          if-no-files-found: error
+
+  release:
+    name: 创建 GitHub Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: 汇总三架构产物
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+
+      - name: 发布
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*.zip
+          generate_release_notes: true

@@ -63,9 +63,11 @@ say "正在获取最新版本信息（api.github.com/repos/$REPO/releases/latest
 API_JSON="$(curl -fsSL --retry 2 "https://api.github.com/repos/$REPO/releases/latest")" \
   || die "获取 release 信息失败（网络不可达或 API 限流？）。可稍后重试。"
 TAG="$(printf '%s' "$API_JSON" | sed -n 's/^[[:space:]]*"tag_name":[[:space:]]*"\([^"]*\)".*/\1/p' | head -n1)"
+# 与布局无关地解析：列出所有 browser_download_url，按包名精确匹配
+# （不能依赖 name 与 download_url 的行距——真实 API 的 uploader 对象很大）
 URL="$(printf '%s' "$API_JSON" \
-        | grep -F "\"name\": \"$ASSET\"" -A 25 \
         | sed -n 's/^[[:space:]]*"browser_download_url":[[:space:]]*"\([^"]*\)".*/\1/p' \
+        | grep -F "/$ASSET" \
         | head -n1)"
 [ -n "$TAG" ] || die "解析最新版本号失败"
 if [ -z "$URL" ]; then

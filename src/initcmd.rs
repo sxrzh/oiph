@@ -195,12 +195,12 @@ pub async fn run_init(force: bool, assets: Option<&str>) -> Result<()> {
         let prompts_dir = crate::config::config_dir().join("prompts");
         let prompt = |name: &str| prompts_dir.join(format!("{name}.md")).display().to_string();
         let cfg = serde_json::json!({
-            "supervisor": { "base_url": null, "api_key": null, "prompt": prompt("supervisor") },
-            "statement":  { "base_url": null, "api_key": null, "prompt": prompt("statement") },
-            "solution":   { "base_url": null, "api_key": null, "prompt": prompt("solution") },
-            "auxiliary":  { "base_url": null, "api_key": null, "prompt": prompt("auxiliary") },
-            "searching":  { "base_url": null, "api_key": null, "prompt": prompt("searching") },
-            "compactor":  { "base_url": null, "api_key": null, "prompt": prompt("compactor") }
+            "supervisor": { "base_url": null, "api_key": null, "model": null, "prompt": prompt("supervisor") },
+            "statement":  { "base_url": null, "api_key": null, "model": null, "prompt": prompt("statement") },
+            "solution":   { "base_url": null, "api_key": null, "model": null, "prompt": prompt("solution") },
+            "auxiliary":  { "base_url": null, "api_key": null, "model": null, "prompt": prompt("auxiliary") },
+            "searching":  { "base_url": null, "api_key": null, "model": null, "prompt": prompt("searching") },
+            "compactor":  { "base_url": null, "api_key": null, "model": null, "prompt": prompt("compactor") }
         });
         std::fs::write(&agents_file, serde_json::to_vec_pretty(&cfg)?)?;
         println!("✓ 生成 {}", agents_file.display());

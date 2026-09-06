@@ -45,9 +45,6 @@ pub struct ToolContext {
     pub kb_dirs: Vec<PathBuf>,
     /// skills 根目录（全局 ~/.oiph/skills 与工程 .oiph/skills）。
     pub skill_roots: Vec<PathBuf>,
-    pub base_url: String,
-    pub api_key: String,
-    pub embed_model: Option<String>,
     /// 查重后端。
     pub dup_backend: crate::dupcheck::Backend,
 }
@@ -56,9 +53,9 @@ impl ToolContext {
     pub fn kb_ctx(&self) -> kb::KbConfig {
         kb::KbConfig {
             dirs: self.kb_dirs.clone(),
-            base_url: self.base_url.clone(),
-            api_key: self.api_key.clone(),
-            embed_model: self.embed_model.clone(),
+            base_url: String::new(),
+            api_key: String::new(),
+            embed_model: None,
         }
     }
 }
@@ -596,9 +593,6 @@ mod tests {
             workdir: d,
             kb_dirs: vec![std::env::temp_dir().join("oiph-test-nonexistent-kb")],
             skill_roots: vec![std::env::temp_dir().join("oiph-test-nonexistent-skills")],
-            base_url: "http://localhost:1/v1".into(),
-            api_key: "test".into(),
-            embed_model: None,
             dup_backend: crate::dupcheck::Backend::Cpret,
         }
     }

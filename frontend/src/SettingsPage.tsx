@@ -18,6 +18,7 @@ interface AgentConf {
   name: string;
   base_url: string | null;
   api_key: string | null;
+  model: string | null;
   reasoning: boolean | null;
   max_context: number | null;
   prompt: string | null;
@@ -161,6 +162,7 @@ function ApiConfigPane() {
           [ag.name]: {
             base_url: ag.base_url || null,
             api_key: ag.api_key || null,
+            model: ag.model || null,
             reasoning: ag.reasoning === null || ag.reasoning === undefined
               ? 'default'
               : ag.reasoning ? 'on' : 'off',
@@ -183,7 +185,7 @@ function ApiConfigPane() {
     <div className="settings-pane">
       <h2>API 配置</h2>
       <BudgetCard />
-      <p className="hint">留空 Base URL / API Key 时回退全局命令行参数。保存后立即生效，无需重启。</p>
+      <p className="hint">Base URL / API Key / 模型按 agent 配置；留空时直接回退环境变量 OPENAI_BASE_URL / OPENAI_API_KEY / OPENAI_MODEL。保存后立即生效，无需重启。</p>
       {agents.map(ag => (
         <div key={ag.name} className="settings-card">
           <h3>{ag.name}</h3>
@@ -193,6 +195,9 @@ function ApiConfigPane() {
           <label>API Key</label>
           <input type="password" value={ag.api_key ?? ''} placeholder="使用全局"
             onChange={e => patch(ag.name, { api_key: e.target.value })} />
+          <label>模型</label>
+          <input value={ag.model ?? ''} placeholder="例如 deepseek-v4-flash"
+            onChange={e => patch(ag.name, { model: e.target.value })} />
           <div className="row">
             <div>
               <label>思考模式</label>

@@ -68,7 +68,12 @@ fn usage_to_value(st: &ServerState, u: &session_mod::TokenUsage) -> Value {
         cache_hit_tokens: u.cache_hit_tokens,
         cache_miss_tokens: u.cache_miss_tokens,
     };
-    let cost = pricing.estimate(&chat_usage, &st.app.model);
+    let model = st
+        .app
+        .settings_for("supervisor")
+        .model
+        .unwrap_or_default();
+    let cost = pricing.estimate(&chat_usage, &model);
     let budget = st.app.budget_snapshot().map(|(used, limit, warn, currency)| {
         json!({ "used": used, "limit": limit, "warn": warn, "currency": currency, "over_warn": limit - used < warn })
     });
@@ -628,6 +633,10 @@ async fn handle_ws(mut socket: WebSocket, st: Arc<ServerState>) {
                         })
                         .to_string(),
                     );
+                    eprintln!(
+                        "[server] 回合结束 interrupted={}",
+                        turn_result.interrupted
+                    );
                 }
                 Err(e) => {
                     let _ = tx_agent.send(
@@ -681,6 +690,7 @@ async fn handle_ws(mut socket: WebSocket, st: Arc<ServerState>) {
                                     let _ = tx_chat.send(req["text"].as_str().unwrap_or("").to_string());
                                 }
                                 Some("stop") => {
+                                    eprintln!("[server] 收到停止请求（来自浏览器中止按钮）");
                                     st.cancel.cancel();
                                 }
                                 Some("ask_answer") => {
@@ -952,6 +962,7 @@ async fn get_settings_agents(State(_st): State<Arc<ServerState>>) -> impl IntoRe
             "name": name,
             "base_url": ac.base_url,
             "api_key": ac.api_key,
+            "model": ac.model,
             "reasoning": ac.reasoning,
             "max_context": ac.max_context,
             "prompt": ac.prompt,
@@ -976,6 +987,8 @@ struct AgentUiConf {
     base_url: Option<String>,
     #[serde(default)]
     api_key: Option<String>,
+    #[serde(default)]
+    model: Option<String>,
     /// "default" | "on" | "off"
     #[serde(default)]
     reasoning: Option<String>,
@@ -1035,6 +1048,7 @@ async fn post_settings_agents(
             config::AgentConfig {
                 base_url: conf.base_url.clone().filter(|s| !s.trim().is_empty()),
                 api_key: conf.api_key.clone().filter(|s| !s.trim().is_empty()),
+                model: conf.model.clone().filter(|s| !s.trim().is_empty()),
                 prompt: existing.prompt,
                 reasoning,
                 price,
@@ -1047,7 +1061,7 @@ async fn post_settings_agents(
         return Json(json!({ "error": format!("{e:#}") }));
     }
     // 热更新：重建 per-agent 客户端与设置并替换到 App（Token 用量统计不受影响）
-    match config::load_agent_setup(&cfg, &st.app.base_url, &st.app.api_key) {
+    match config::load_agent_setup(&cfg) {
         Ok(setup) => {
             st.app
                 .set_agent_setup(setup.prompts, setup.clients, setup.settings, setup.compactor_prompt);
@@ -1162,16 +1176,8 @@ async fn post_kb_add(
     if let Err(e) = crate::kb::save_source_file(&dir, &req.name, &req.content) {
         return Json(json!({ "error": format!("{e:#}") }));
     }
-    match crate::kb::add_document(
-        &dir,
-        &req.name,
-        &req.content,
-        &st.app.base_url,
-        &st.app.api_key,
-        st.app.embed_model.clone().as_deref(),
-    )
-    .await
-    {
+    // 本地哈希 embedding，无需 API 配置
+    match crate::kb::add_document(&dir, &req.name, &req.content, "", "", None).await {
         Ok(n) => Json(json!({ "ok": true, "chunks": n })),
         Err(e) => {
             // 索引失败则回滚源文件副本，避免出现"有文件无索引"的悬空项

@@ -2,7 +2,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use chrono::Utc;
 use serde_json::Value;
 
@@ -26,8 +26,7 @@ pub enum Role {
     Auxiliary,
 }
 
-pub struct AgentDeps<'a> {
-    pub model: &'a str,
+pub struct AgentDeps {
     pub max_steps: usize,
 }
 
@@ -322,7 +321,7 @@ pub fn system_message_for(role: Role, app: &App) -> Message {
 /// - `cancel`：打断标志（双 Esc 触发）。
 #[allow(clippy::too_many_arguments)]
 pub async fn run_turn(
-    deps: &AgentDeps<'_>,
+    deps: &AgentDeps,
     app: &App,
     role: Role,
     fixed_workdir: Option<&Path>,
@@ -374,10 +373,19 @@ pub async fn run_turn(
         };
         let ctx = app.tool_ctx(&workdir);
 
-        // per-agent 客户端（agents.json 配置了 base_url/api_key 的 agent），否则全局
+        // per-agent 客户端（agents.json 配置了 base_url/api_key 的 agent），否则回退 supervisor
         let role_name = prompts::role_name(role);
-        let client = app.client_for(role_name).unwrap_or_else(|| app.client.clone());
+        let client = app.client_for(role_name).ok_or_else(|| {
+            anyhow!(
+                "agent '{role_name}' 未配置 base_url/api_key（请在设置页或 agents.json 中配置，或设置环境变量 OPENAI_BASE_URL / OPENAI_API_KEY）"
+            )
+        })?;
         let settings = app.settings_for(role_name);
+        let model = settings.model.clone().ok_or_else(|| {
+            anyhow!(
+                "agent '{role_name}' 未配置模型（请在设置页或 agents.json 中设置 model，或设置环境变量 OPENAI_MODEL）"
+            )
+        })?;
 
         // 上下文长度检查：有效上下文（应用压缩历史后）超过 max_context 时
         // 先调用 compactor 压缩，再继续本步模型调用
@@ -386,11 +394,11 @@ pub async fn run_turn(
             .map(crate::client::estimate_message_tokens)
             .sum::<f64>() as u64;
         if est_ctx > settings.max_context {
-            compact_context(deps, app, messages, cancel, progress_tx).await?;
+            compact_context(app, messages, cancel, progress_tx).await?;
         }
 
         let result = match client
-            .chat_stream(deps.model, messages, &tool_defs, cancel, on_content, on_reasoning, settings.reasoning)
+            .chat_stream(&model, messages, &tool_defs, cancel, on_content, on_reasoning, settings.reasoning)
             .await
         {
             Ok(r) => {
@@ -418,7 +426,7 @@ pub async fn run_turn(
 
         // 累加 usage；同时按本次调用用量累计费用预算（换算到预算货币，只增不减）
         if let Some(u) = &result.usage
-            && let Some(c) = settings.pricing.estimate(u, deps.model)
+            && let Some(c) = settings.pricing.estimate(u, &model)
         {
             app.budget_accumulate(c.amount, &c.currency).await;
         }
@@ -444,7 +452,7 @@ pub async fn run_turn(
 
         // 每步结束后实时显示累计用量（CLI 终端打印；GUI 走 usage_turn 增量消息）
         if let Some(acc) = &total_usage {
-            let cost = settings.pricing.estimate(acc, deps.model);
+            let cost = settings.pricing.estimate(acc, &model);
             term::println_err(&crate::client::format_usage_cost(acc, cost.as_ref()));
             if role == Role::Supervisor {
                 let mut u = serde_json::json!({
@@ -608,17 +616,20 @@ pub async fn run_turn(
 /// 完整历史）；随后应用压缩变换（丢弃 compaction 之前的非 system 内容、摘要
 /// 并入 system），相当于重新加载 session，本回合继续使用压缩后的上下文。
 async fn compact_context(
-    deps: &AgentDeps<'_>,
     app: &App,
     messages: &mut Vec<Message>,
     cancel: &CancelFlag,
     progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<Vec<Message>>>,
 ) -> Result<()> {
-    let client = app
-        .client_for(crate::config::COMPACTOR)
-        .or_else(|| app.client_for("supervisor"))
-        .unwrap_or_else(|| app.client.clone());
+    let Some(client) = app.client_for(crate::config::COMPACTOR) else {
+        bail!(
+            "compactor 未配置 base_url/api_key（请在设置页或 agents.json 中配置，或设置环境变量 OPENAI_BASE_URL / OPENAI_API_KEY）"
+        );
+    };
     let compactor_settings = app.settings_for(crate::config::COMPACTOR);
+    let model = compactor_settings.model.clone().ok_or_else(|| {
+        anyhow!("compactor 未配置模型（请在设置页或 agents.json 中设置 model，或设置环境变量 OPENAI_MODEL）")
+    })?;
     let prompt = app.compactor_prompt();
 
     let mut cmsgs: Vec<Message> = messages
@@ -633,13 +644,13 @@ async fn compact_context(
         messages.iter().map(crate::client::estimate_message_tokens).sum::<f64>() as u64
     ));
     let result = client
-        .chat_stream(deps.model, &cmsgs, &[], cancel, term::noop, term::noop, compactor_settings.reasoning)
+        .chat_stream(&model, &cmsgs, &[], cancel, term::noop, term::noop, compactor_settings.reasoning)
         .await
         .context("上下文压缩失败")?;
     anyhow::ensure!(!result.interrupted, "上下文压缩被中止");
     // 压缩调用也计入费用预算
     if let Some(u) = &result.usage
-        && let Some(c) = compactor_settings.pricing.estimate(u, deps.model) {
+        && let Some(c) = compactor_settings.pricing.estimate(u, &model) {
             app.budget_accumulate(c.amount, &c.currency).await;
         }
     let summary = result.message.content.unwrap_or_default();
@@ -713,7 +724,7 @@ pub async fn dispatch(
     role: Role,
     app: &App,
     ctx: &ToolContext,
-    deps: &AgentDeps<'_>,
+    deps: &AgentDeps,
     cancel: &CancelFlag,
     name: &str,
     args: &Value,
@@ -1180,7 +1191,7 @@ async fn call_sub_agent(
     role: Role,
     app: &App,
     ctx: &ToolContext,
-    deps: &AgentDeps<'_>,
+    deps: &AgentDeps,
     cancel: &CancelFlag,
     args: &Value,
 ) -> String {
@@ -1314,23 +1325,11 @@ mod tests {
     use super::*;
 
     fn test_app(root: PathBuf) -> App {
-        App::new(
-            root,
-            "http://localhost:1/v1".into(),
-            "k".into(),
-            None,
-            "m".into(),
-            10,
-            crate::dupcheck::Backend::Cpret,
-        )
-        .unwrap()
+        App::new(root, 10, crate::dupcheck::Backend::Cpret).unwrap()
     }
 
-    fn deps() -> AgentDeps<'static> {
-        AgentDeps {
-            model: "m",
-            max_steps: 10,
-        }
+    fn deps() -> AgentDeps {
+        AgentDeps { max_steps: 10 }
     }
 
     #[test]

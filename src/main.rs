@@ -51,29 +51,14 @@ use state::App;
 #[derive(Parser)]
 #[command(
     name = "oiph",
+    version,
     about = "OI 模拟赛组题助手：supervisor + 多个子 Agent（searching/statement/solution/auxiliary），\
 支持工具调用、RAG 知识库、Skills。"
 )]
 struct Cli {
-    /// OpenAI 兼容 base URL（不含 /chat/completions）。
-    #[arg(long, short = 'u', env = "OPENAI_BASE_URL", default_value = "https://api.openai.com/v1", hide_env_values = true, global = true)]
-    base_url: String,
-
-    /// 模型供应商 API key。
-    #[arg(long, short = 'k', env = "OPENAI_API_KEY", hide_env_values = true, global = true)]
-    api_key: Option<String>,
-
-    /// 模型名称。
-    #[arg(long, short = 'm', default_value = "deepseek-v4-flash", global = true)]
-    model: String,
-
     /// 每回合最大工具使用轮数。
     #[arg(long, default_value_t = 40, global = true)]
     max_steps: usize,
-
-    /// embedding 模型（OpenAI 兼容 /embeddings）。省略则使用内置离线哈希 embedding。
-    #[arg(long, global = true)]
-    embedding_model: Option<String>,
 
     /// 指定比赛目录（相对或绝对路径）。
     #[arg(long, short = 'c', global = true)]
@@ -406,17 +391,9 @@ async fn run_gui(cli: &Cli) -> Result<()> {
     let root = std::env::current_dir()?;
     let dup_backend = dupcheck::Backend::parse(&cli.dup_backend).unwrap_or_default();
     // 启动检查：agents.json + 提示词
-    let setup = config::require_agent_setup(&cli.base_url, cli.api_key.as_deref().unwrap_or(""))
-        .map_err(|e| anyhow!("{e:#}\n（请先运行 init.sh 初始化 ~/.oiph）"))?;
-    let app = Arc::new(App::new(
-        root,
-        cli.base_url.clone(),
-        cli.api_key.clone().unwrap_or_default(),
-        cli.embedding_model.clone(),
-        cli.model.clone(),
-        cli.max_steps,
-        dup_backend,
-    )?);
+    let setup = config::require_agent_setup()
+        .map_err(|e| anyhow!("{e:#}\n（请先运行 `oiph init` 初始化 ~/.oiph）"))?;
+    let app = Arc::new(App::new(root, cli.max_steps, dup_backend)?);
     app.set_agent_setup(setup.prompts, setup.clients, setup.settings, setup.compactor_prompt);
     let contest_dir = resolve_contest(&app.root, cli.contest.as_deref());
     app.set_contest_dir(contest_dir);
@@ -426,11 +403,7 @@ async fn run_gui(cli: &Cli) -> Result<()> {
 async fn run_cli(cli: &Cli, prompt: Option<&str>) -> Result<()> {
     // 构造一个伪 Cli prompt 并调用 run_repl
     let fake_cli = Cli {
-        base_url: cli.base_url.clone(),
-        api_key: cli.api_key.clone(),
-        model: cli.model.clone(),
         max_steps: cli.max_steps,
-        embedding_model: cli.embedding_model.clone(),
         contest: cli.contest.clone(),
         dup_backend: cli.dup_backend.clone(),
         port: cli.port,
@@ -455,17 +428,9 @@ async fn run_kb_cmd(cli: &Cli, cmd: &KbCmd) -> Result<()> {
     let root = std::env::current_dir()?;
     match cmd {
         KbCmd::Add { path, global, source } => {
-            require_api_key_for_embeddings(cli.embedding_model.as_deref(), cli.api_key.as_deref())?;
             let dir = kb_target_dir(&root, cli.contest.as_deref(), *global);
-            kb::cmd_add(
-                path,
-                &dir,
-                &cli.base_url,
-                cli.api_key.as_deref().unwrap_or(""),
-                cli.embedding_model.as_deref(),
-                source.as_deref(),
-            )
-            .await
+            // 本地哈希 embedding，无需 API 配置
+            kb::cmd_add(path, &dir, "", "", None, source.as_deref()).await
         }
         KbCmd::List => {
             let mut dirs = vec![paths::global_kb_dir()];
@@ -485,9 +450,9 @@ async fn run_kb_cmd(cli: &Cli, cmd: &KbCmd) -> Result<()> {
             }
             let cfg = kb::KbConfig {
                 dirs,
-                base_url: cli.base_url.clone(),
-                api_key: cli.api_key.clone().unwrap_or_default(),
-                embed_model: cli.embedding_model.clone(),
+                base_url: String::new(),
+                api_key: String::new(),
+                embed_model: None,
             };
             let out = kb::search(&cfg, query, k.unwrap_or(4) as usize).await?;
             println!("{out}");
@@ -720,30 +685,15 @@ fn run_test_cmd(cli: &Cli, problem: Option<&str>) -> Result<()> {
     Ok(())
 }
 
-fn require_api_key_for_embeddings(embed_model: Option<&str>, api_key: Option<&str>) -> Result<()> {
-    if embed_model.is_some() && api_key.is_none() {
-        bail!("--embedding-model 需要 API key（--api-key 或 OPENAI_API_KEY）");
-    }
-    Ok(())
-}
-
 /// 启动时把内置知识库文档种子到全局知识库（~/.oiph/kb），内置 skills 种子到
 /// 全局 skills（~/.oiph/skills）。已存在的跳过。
 async fn run_repl(cli: &Cli, root: &Path) -> Result<()> {
     let dup_backend = dupcheck::Backend::parse(&cli.dup_backend)
         .unwrap_or(dupcheck::Backend::Cpret);
     // 启动检查：agents.json + 提示词
-    let setup = config::require_agent_setup(&cli.base_url, cli.api_key.as_deref().unwrap_or(""))
-        .map_err(|e| anyhow!("{e:#}\n（请先运行 init.sh 初始化 ~/.oiph）"))?;
-    let app = Arc::new(App::new(
-        root.to_path_buf(),
-        cli.base_url.clone(),
-        cli.api_key.clone().unwrap_or_default(),
-        cli.embedding_model.clone(),
-        cli.model.clone(),
-        cli.max_steps,
-        dup_backend,
-    )?);
+    let setup = config::require_agent_setup()
+        .map_err(|e| anyhow!("{e:#}\n（请先运行 `oiph init` 初始化 ~/.oiph）"))?;
+    let app = Arc::new(App::new(root.to_path_buf(), cli.max_steps, dup_backend)?);
     app.set_agent_setup(setup.prompts, setup.clients, setup.settings, setup.compactor_prompt);
 
     let contest_dir = resolve_contest(root, cli.contest.as_deref());
@@ -839,14 +789,6 @@ async fn run_repl(cli: &Cli, root: &Path) -> Result<()> {
                 Ok(SlashOutcome::Exit) => break,
                 Ok(SlashOutcome::Continue) => {}
                 Err(e) => eprintln!("错误：{e:#}"),
-            }
-            continue;
-        }
-
-        if app.api_key.is_empty() {
-            eprintln!("需要 API key：--api-key 或 OPENAI_API_KEY（查看状态可用 /status）");
-            if !tty {
-                return Err(anyhow!("缺少 API key"));
             }
             continue;
         }
@@ -1258,9 +1200,6 @@ async fn handle_slash_kb(app: &App, args: &[&str]) -> Result<()> {
     let dirs = app.kb_dirs();
     match args {
         ["add", path] | ["add", path, "global"] => {
-            if app.embed_model.is_some() && app.api_key.is_empty() {
-                bail!("--embedding-model 需要 API key");
-            }
             let global = args.get(2).is_some_and(|s| *s == "global");
             let dir = if global {
                 dirs[0].clone()
@@ -1269,15 +1208,8 @@ async fn handle_slash_kb(app: &App, args: &[&str]) -> Result<()> {
             } else {
                 dirs[0].clone()
             };
-            kb::cmd_add(
-                path,
-                &dir,
-                &app.base_url,
-                &app.api_key,
-                app.embed_model.as_deref(),
-                None,
-            )
-            .await
+            // 本地哈希 embedding，无需 API 配置
+            kb::cmd_add(path, &dir, "", "", None, None).await
         }
         ["list"] => kb::cmd_list(&dirs),
         ["clear"] | ["clear", "global"] => {

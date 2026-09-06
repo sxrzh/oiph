@@ -58,6 +58,9 @@ pub struct AgentConfig {
     pub base_url: Option<String>,
     #[serde(default)]
     pub api_key: Option<String>,
+    /// 模型名称（必需；未设置时该 agent 调用会报错提示配置）。
+    #[serde(default)]
+    pub model: Option<String>,
     /// 提示词文件路径；compactor 可省略（使用内置默认提示词）。
     #[serde(default)]
     pub prompt: Option<String>,
@@ -80,6 +83,8 @@ pub type AgentsConfig = HashMap<String, AgentConfig>;
 /// agent 运行设置（从 agents.json 解析）。
 #[derive(Debug, Clone)]
 pub struct AgentSettings {
+    /// 模型名称。
+    pub model: Option<String>,
     /// 思考模式。
     pub reasoning: Option<bool>,
     /// 最长上下文（token 估算）。
@@ -91,6 +96,7 @@ pub struct AgentSettings {
 impl Default for AgentSettings {
     fn default() -> Self {
         Self {
+            model: None,
             reasoning: None,
             max_context: DEFAULT_MAX_CONTEXT,
             pricing: Pricing::None,
@@ -146,8 +152,29 @@ pub struct AgentSetup {
     pub compactor_prompt: String,
 }
 
+/// 读取非空环境变量。
+fn env_non_empty(var: &str) -> Option<String> {
+    std::env::var(var).ok().filter(|s| !s.trim().is_empty())
+}
+
+/// 解析单个 agent 的有效配置：自身显式值 → 环境变量
+/// （OPENAI_BASE_URL / OPENAI_API_KEY / OPENAI_MODEL）。
+fn resolve_agent(ac: &AgentConfig) -> AgentConfig {
+    let mut resolved = ac.clone();
+    resolved.base_url = ac
+        .base_url
+        .clone()
+        .or_else(|| env_non_empty("OPENAI_BASE_URL"));
+    resolved.api_key = ac
+        .api_key
+        .clone()
+        .or_else(|| env_non_empty("OPENAI_API_KEY"));
+    resolved.model = ac.model.clone().or_else(|| env_non_empty("OPENAI_MODEL"));
+    resolved
+}
+
 /// 构建单个 agent 的计价策略。
-fn build_pricing(ac: &AgentConfig, global_base_url: &str) -> Result<Pricing> {
+fn build_pricing(ac: &AgentConfig) -> Result<Pricing> {
     if let Some(p) = &ac.price {
         return Ok(Pricing::fixed(p.clone()));
     }
@@ -155,24 +182,21 @@ fn build_pricing(ac: &AgentConfig, global_base_url: &str) -> Result<Pricing> {
         && policy != "auto" {
             bail!("不支持的 price-policy：'{policy}'（目前仅支持 \"auto\"）");
         }
-    // price 与 price-policy 都没有 → auto 模式
-    let base = ac.base_url.clone().unwrap_or_else(|| global_base_url.to_string());
-    Ok(crate::pricing::auto(&base))
+    // price 与 price-policy 都没有 → auto 模式（base_url 为空时 pricing::auto 回退环境变量）
+    Ok(crate::pricing::auto(ac.base_url.as_deref().unwrap_or("")))
 }
 
 /// 加载提示词文件并构建 per-agent 客户端与运行设置。
-pub fn load_agent_setup(
-    cfg: &AgentsConfig,
-    global_base_url: &str,
-    global_api_key: &str,
-) -> Result<AgentSetup> {
+/// 每个 agent 的 base_url/api_key/model 按"自身显式值 → 环境变量"回退解析；
+/// 解析后同时配置了 base_url 与 api_key 才构建独立客户端。
+pub fn load_agent_setup(cfg: &AgentsConfig) -> Result<AgentSetup> {
     let mut prompts = AgentPrompts::default();
     let mut clients = HashMap::new();
     let mut settings = HashMap::new();
 
     // 必需的五个 agent
     for name in AGENTS {
-        let ac = &cfg[*name];
+        let ac = &resolve_agent(&cfg[*name]);
         let prompt_path = ac
             .prompt
             .as_deref()
@@ -193,26 +217,26 @@ pub fn load_agent_setup(
             crate::prompts::role_from_name(name).ok_or_else(|| anyhow!("未知 agent '{name}'"))?,
             text,
         );
-        // base_url / api_key 任一设置即用 per-agent 客户端（缺省回退全局值）
-        if ac.base_url.is_some() || ac.api_key.is_some() {
-            let base = ac.base_url.clone().unwrap_or_else(|| global_base_url.to_string());
-            let key = ac.api_key.clone().unwrap_or_else(|| global_api_key.to_string());
-            let client = Client::new(base, key)?;
+        // base_url 与 api_key 都配置时才用独立客户端（否则运行时回退 supervisor）
+        if let (Some(base), Some(key)) = (&ac.base_url, &ac.api_key) {
+            let client = Client::new(base.clone(), key.clone())?;
             clients.insert(name.to_string(), client);
         }
         settings.insert(
             name.to_string(),
             AgentSettings {
+                model: ac.model.clone(),
                 reasoning: ac.reasoning,
                 max_context: ac.max_context.unwrap_or(DEFAULT_MAX_CONTEXT),
-                pricing: build_pricing(ac, global_base_url)?,
+                pricing: build_pricing(ac)?,
             },
         );
     }
 
     // 可选的 compactor：缺省回退 supervisor 客户端 + 内置提示词
     let mut compactor_prompt = DEFAULT_COMPACTOR_PROMPT.to_string();
-    if let Some(ac) = cfg.get(COMPACTOR) {
+    if let Some(raw) = cfg.get(COMPACTOR) {
+        let ac = &resolve_agent(raw);
         if let Some(p) = &ac.prompt {
             let path = expand_tilde(p);
             let text = std::fs::read_to_string(&path)
@@ -220,17 +244,16 @@ pub fn load_agent_setup(
             anyhow::ensure!(!text.trim().is_empty(), "compactor 的提示词为空：{}", path.display());
             compactor_prompt = text;
         }
-        if ac.base_url.is_some() || ac.api_key.is_some() {
-            let base = ac.base_url.clone().unwrap_or_else(|| global_base_url.to_string());
-            let key = ac.api_key.clone().unwrap_or_else(|| global_api_key.to_string());
-            clients.insert(COMPACTOR.to_string(), Client::new(base, key)?);
+        if let (Some(base), Some(key)) = (&ac.base_url, &ac.api_key) {
+            clients.insert(COMPACTOR.to_string(), Client::new(base.clone(), key.clone())?);
         }
         settings.insert(
             COMPACTOR.to_string(),
             AgentSettings {
+                model: ac.model.clone(),
                 reasoning: ac.reasoning,
                 max_context: ac.max_context.unwrap_or(DEFAULT_MAX_CONTEXT),
-                pricing: build_pricing(ac, global_base_url)?,
+                pricing: build_pricing(ac)?,
             },
         );
     }
@@ -239,9 +262,9 @@ pub fn load_agent_setup(
 }
 
 /// 启动检查 + 加载。agents.json 不存在则报错。
-pub fn require_agent_setup(global_base_url: &str, global_api_key: &str) -> Result<AgentSetup> {
+pub fn require_agent_setup() -> Result<AgentSetup> {
     let cfg = load_agents_config()?;
-    load_agent_setup(&cfg, global_base_url, global_api_key)
+    load_agent_setup(&cfg)
 }
 
 #[cfg(test)]
@@ -262,12 +285,14 @@ mod tests {
         let cfg: AgentConfig = serde_json::from_str(
             r#"{
                 "prompt": "p.md",
+                "model": "deepseek-v4-flash",
                 "reasoning": true,
                 "price": { "input": 3.0, "hit": 0.1, "output": 9.0, "currency": "￥" },
                 "max_context": 65536
             }"#,
         )
         .unwrap();
+        assert_eq!(cfg.model.as_deref(), Some("deepseek-v4-flash"));
         assert_eq!(cfg.reasoning, Some(true));
         assert_eq!(cfg.max_context, Some(65536));
         let p = cfg.price.unwrap();
@@ -286,7 +311,7 @@ mod tests {
             r#"{ "prompt": "p", "price": { "input": 1, "hit": 0.1, "output": 2 }, "price-policy": "auto" }"#,
         )
         .unwrap();
-        let p = build_pricing(&ac, "https://api.deepseek.com/v1").unwrap();
+        let p = build_pricing(&ac).unwrap();
         assert!(matches!(p, Pricing::Fixed(_)));
     }
 
@@ -295,7 +320,7 @@ mod tests {
         let ac: AgentConfig =
             serde_json::from_str(r#"{ "prompt": "p", "base_url": "https://api.deepseek.com/v1" }"#)
                 .unwrap();
-        let p = build_pricing(&ac, "https://x").unwrap();
+        let p = build_pricing(&ac).unwrap();
         assert!(matches!(p, Pricing::DeepSeek));
     }
 
@@ -303,6 +328,35 @@ mod tests {
     fn build_pricing_rejects_unknown_policy() {
         let ac: AgentConfig =
             serde_json::from_str(r#"{ "prompt": "p", "price-policy": "magic" }"#).unwrap();
-        assert!(build_pricing(&ac, "https://x").is_err());
+        assert!(build_pricing(&ac).is_err());
+    }
+
+    #[test]
+    fn resolve_agent_env_fallback() {
+        let _guard = crate::paths::tests::lock_home();
+        #[allow(unused_unsafe)]
+        unsafe {
+            std::env::set_var("OPENAI_BASE_URL", "https://api.deepseek.com/v1");
+            std::env::set_var("OPENAI_API_KEY", "sk-test");
+            std::env::set_var("OPENAI_MODEL", "deepseek-v4-flash");
+        }
+        // 全 null 的 agent：直接回退环境变量
+        let empty: AgentConfig = serde_json::from_str(r#"{ "prompt": "p" }"#).unwrap();
+        let r = resolve_agent(&empty);
+        assert_eq!(r.base_url.as_deref(), Some("https://api.deepseek.com/v1"));
+        assert_eq!(r.api_key.as_deref(), Some("sk-test"));
+        assert_eq!(r.model.as_deref(), Some("deepseek-v4-flash"));
+        // 自身显式值最优先
+        let own: AgentConfig =
+            serde_json::from_str(r#"{ "prompt": "p", "model": "own-model" }"#).unwrap();
+        let r2 = resolve_agent(&own);
+        assert_eq!(r2.model.as_deref(), Some("own-model"));
+
+        #[allow(unused_unsafe)]
+        unsafe {
+            std::env::remove_var("OPENAI_BASE_URL");
+            std::env::remove_var("OPENAI_API_KEY");
+            std::env::remove_var("OPENAI_MODEL");
+        }
     }
 }

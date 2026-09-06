@@ -248,6 +248,8 @@ export default function App() {
     } else if (msg.type === 'session_created') {
       setCurrentSession((msg as any).name);
       sessionNameRef.current = (msg as any).name;
+      // 立即刷新会话列表（否则新会话要等 5s 轮询才出现，看起来像没创建）
+      refreshSessionList();
     } else if (msg.type === 'messages') {
       const displayMsgs = messagesToDisplay((msg as any).messages);
       setMessages(displayMsgs);

@@ -17,7 +17,9 @@ curl -fsSL http://sxrzh.github.io/oiph/install/latest.sh | bash -s -- --user ali
 ```
 
 ### Docker 镜像  
-> Coming soon.
+```sh
+docker run -it -p 17217:17217 rzh123/oiph:latest
+```
 
 ### 从源码构建
 
@@ -258,5 +260,4 @@ OIPH 为多 Agent 系统，与用户交互的是 supervisor，它以工具调用
 
 - **安全问题**：目前没有实现沙箱、权限控制，agent 的工具可以访问到整个系统的文件，而且有可能运行从网络上抓取的代码。建议您在虚拟机或 docker 中运行 OIPH 并严格监控防止信息泄露；
 - 提交答案题的功能目前还没有得到充分测试；
-- 接入 GLM 时有时候回复输出混乱；接入 DeepSeek 运行比较流畅；
 - 集成测试不检查 Subtask 配置情况。

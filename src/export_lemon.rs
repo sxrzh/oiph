@@ -507,7 +507,7 @@ mod tests {
         let pdir = project::problem_dir(&dir, "c");
         std::fs::create_dir_all(pdir.join("auxiliary")).unwrap();
         std::fs::write(pdir.join("auxiliary").join("interactive_lib.cpp"), "int main(){}").unwrap();
-        std::fs::write(pdir.join("auxiliary").join(format!("c.h")), "#pragma once").unwrap();
+        std::fs::write(pdir.join("auxiliary").join("c.h"), "#pragma once").unwrap();
 
         let (out, warnings) = export(&dir, None).unwrap();
         assert!(warnings.is_empty());

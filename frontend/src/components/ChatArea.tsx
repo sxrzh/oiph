@@ -134,6 +134,20 @@ function RunningToolBadge({ name, startedAt }: { name: string; startedAt: number
   );
 }
 
+/// 工具调用/结果正文：超过 300 字符用 spoiler 折叠（默认折叠，点击展开）。
+function ToolBody({ text }: { text: string }) {
+  if (text.length <= 300) {
+    return <div className="text" style={{ whiteSpace: 'pre-wrap' }}>{text}</div>;
+  }
+  const head = text.replace(/\s+/g, ' ').trim();
+  const preview = head.length > 60 ? `${head.slice(0, 60)}…` : head;
+  return (
+    <Spoiler title={`${preview}（共 ${text.length} 字符，点击展开）`} defaultOpen={false}>
+      <div className="text" style={{ whiteSpace: 'pre-wrap', maxHeight: '420px', overflow: 'auto' }}>{text}</div>
+    </Spoiler>
+  );
+}
+
 function ChatMessageView({
   msg,
   child,
@@ -156,6 +170,8 @@ function ChatMessageView({
         {displayContent}
       </ReactMarkdown>
     </div>
+  ) : msg.role === 'tool' ? (
+    <ToolBody text={displayContent} />
   ) : (
     <div className="text" style={{ whiteSpace: 'pre-wrap' }}>{displayContent}</div>
   );

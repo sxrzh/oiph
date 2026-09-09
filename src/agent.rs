@@ -1,6 +1,7 @@
 //! Agent 循环、工具定义与派发（项目工具、子 Agent 调度、桩工具）。
 
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result, anyhow, bail};
 use chrono::Utc;
@@ -16,6 +17,56 @@ use crate::prompts;
 use crate::state::App;
 use crate::term::{self, CancelFlag};
 use crate::tools::{self, ToolContext};
+
+/// 回合共享用量累积器：supervisor 回合内嵌套子 Agent / compactor 的模型调用
+/// 用量都并入同一个 sink，回合结束时统一计入基线（否则子 Agent 的长输出
+/// 不计入任何统计，回合结束后状态栏会"回到使用前状态"）。
+pub type UsageSink = Arc<Mutex<Option<ChatUsage>>>;
+
+/// 把一次调用的用量合并进累积器（无则初始化）。
+pub fn merge_usage(dst: &mut Option<ChatUsage>, u: &ChatUsage) {
+    *dst = Some(match dst.take() {
+        Some(mut acc) => {
+            acc.prompt_tokens += u.prompt_tokens;
+            acc.completion_tokens += u.completion_tokens;
+            acc.total_tokens += u.total_tokens;
+            acc.cache_hit_tokens = match (acc.cache_hit_tokens, u.cache_hit_tokens) {
+                (Some(a), Some(b)) => Some(a + b),
+                (a, b) => a.or(b),
+            };
+            acc.cache_miss_tokens = match (acc.cache_miss_tokens, u.cache_miss_tokens) {
+                (Some(a), Some(b)) => Some(a + b),
+                (a, b) => a.or(b),
+            };
+            acc
+        }
+        None => u.clone(),
+    });
+}
+
+/// 全零用量视为"尚无用量"（供应商可能返回全零 usage）。
+fn is_zero_usage(u: &ChatUsage) -> bool {
+    u.prompt_tokens == 0 && u.completion_tokens == 0 && u.total_tokens == 0
+}
+
+/// 回合共享 sink 的非零快照（用于每步结束的展示与 usage_turn 推送）。
+fn snapshot_usage(sink: &UsageSink) -> Option<ChatUsage> {
+    sink.lock()
+        .unwrap()
+        .as_ref()
+        .filter(|u| !is_zero_usage(u))
+        .cloned()
+}
+
+/// 返回前取走回合最终用量：顶层（自建 sink）整体取走；
+/// 子 Agent（共享父回合 sink）只取快照，不干扰父回合继续累积。
+fn take_or_snapshot(sink: &UsageSink, is_top: bool) -> Option<ChatUsage> {
+    if is_top {
+        sink.lock().unwrap().take()
+    } else {
+        snapshot_usage(sink)
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Role {
@@ -319,6 +370,8 @@ pub fn system_message_for(role: Role, app: &App) -> Message {
 /// - 子 Agent：使用固定的 `fixed_workdir`（比赛目录）。
 /// - `stream_output`：是否实时打印模型输出内容（supervisor 为 true，子 Agent 为 false）。
 /// - `cancel`：打断标志（双 Esc 触发）。
+/// - `usage_sink`：回合共享用量累积器。supervisor（顶层）传 None 自建；
+///   子 Agent 传父回合的 sink，把自己的调用用量并入父回合统计。
 #[allow(clippy::too_many_arguments)]
 pub async fn run_turn(
     deps: &AgentDeps,
@@ -330,11 +383,20 @@ pub async fn run_turn(
     stream_reasoning: bool,
     cancel: &CancelFlag,
     progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<Vec<Message>>>,
+    usage_sink: Option<&UsageSink>,
 ) -> Result<TurnResult> {
     let tool_defs = definitions_for(role);
     let on_content: fn(&str) = if stream_content { term::print_content } else { term::noop };
     let on_reasoning: fn(&str) = if stream_reasoning { term::print_reasoning } else { term::noop };
-    let mut total_usage: Option<ChatUsage> = None;
+    // 顶层自建 sink；子 Agent 沿用父回合的 sink（本回合内共享）。
+    // sink 是回合内唯一的用量累积器：顶层与子 Agent / compactor 的每次
+    // 模型调用用量都并入它，任何一步结束都能拿到"至今累计"的快照。
+    let is_top = usage_sink.is_none();
+    let own_sink: UsageSink = Arc::new(Mutex::new(None));
+    let sink: &UsageSink = match usage_sink {
+        Some(s) => s,
+        None => &own_sink,
+    };
     // searching-agent 的搜索调用计数（web_search + fetch_url），超过上限则停止
     let mut search_call_count: u32 = 0;
     const SEARCH_LIMIT: u32 = 30;
@@ -353,7 +415,7 @@ pub async fn run_turn(
             return Ok(TurnResult {
                 text: String::new(),
                 interrupted: true,
-                usage: total_usage,
+                usage: take_or_snapshot(sink, is_top),
             });
         }
 
@@ -371,7 +433,9 @@ pub async fn run_turn(
             Some(w) => w.to_path_buf(),
             None => app.contest_dir().unwrap_or_else(|| app.root.clone()),
         };
-        let ctx = app.tool_ctx(&workdir);
+        let mut ctx = app.tool_ctx(&workdir);
+        // 注入回合共享用量累积器（嵌套子 Agent 据此并入父回合统计）
+        ctx.usage_sink = Some(sink.clone());
 
         // per-agent 客户端（agents.json 配置了 base_url/api_key 的 agent），否则回退 supervisor
         let role_name = prompts::role_name(role);
@@ -394,7 +458,7 @@ pub async fn run_turn(
             .map(crate::client::estimate_message_tokens)
             .sum::<f64>() as u64;
         if est_ctx > settings.max_context {
-            compact_context(app, messages, cancel, progress_tx).await?;
+            compact_context(app, messages, cancel, progress_tx, sink).await?;
         }
 
         let result = match client
@@ -424,50 +488,32 @@ pub async fn run_turn(
             }
         };
 
-        // 累加 usage；同时按本次调用用量累计费用预算（换算到预算货币，只增不减）
-        if let Some(u) = &result.usage
-            && let Some(c) = settings.pricing.estimate(u, &model)
-        {
-            app.budget_accumulate(c.amount, &c.currency).await;
-        }
+        // 累加 usage（回合唯一累积器）；同时按本次调用用量累计费用预算
         if let Some(u) = &result.usage {
-            total_usage = Some(match &mut total_usage {
-                Some(acc) => {
-                    acc.prompt_tokens += u.prompt_tokens;
-                    acc.completion_tokens += u.completion_tokens;
-                    acc.total_tokens += u.total_tokens;
-                    acc.cache_hit_tokens = match (acc.cache_hit_tokens, u.cache_hit_tokens) {
-                        (Some(a), Some(b)) => Some(a + b),
-                        (a, b) => a.or(b),
-                    };
-                    acc.cache_miss_tokens = match (acc.cache_miss_tokens, u.cache_miss_tokens) {
-                        (Some(a), Some(b)) => Some(a + b),
-                        (a, b) => a.or(b),
-                    };
-                    acc.clone()
-                }
-                None => u.clone(),
-            });
+            merge_usage(&mut sink.lock().unwrap(), u);
+            if let Some(c) = settings.pricing.estimate(u, &model) {
+                app.budget_accumulate(c.amount, &c.currency).await;
+            }
         }
 
-        // 每步结束后实时显示累计用量（CLI 终端打印；GUI 走 usage_turn 增量消息）
-        if let Some(acc) = &total_usage {
-            let cost = settings.pricing.estimate(acc, &model);
-            term::println_err(&crate::client::format_usage_cost(acc, cost.as_ref()));
-            if role == Role::Supervisor {
-                let mut u = serde_json::json!({
-                    "input": acc.prompt_tokens,
-                    "output": acc.completion_tokens,
-                    "cache_hit_tokens": acc.cache_hit_tokens,
-                });
-                if let Some(c) = &cost {
-                    u["cost"] = serde_json::json!({ "currency": c.currency, "amount": c.amount });
-                }
-                if let Some((used, limit, warn, currency)) = app.budget_snapshot() {
-                    u["budget"] = serde_json::json!({ "used": used, "limit": limit, "warn": warn, "currency": currency });
-                }
-                term::send_usage_turn(&u.to_string());
+        // 每步结束后推送累计用量：CLI 终端打印；GUI 走 usage_turn 消息。
+        // 所有角色都发（子 Agent 的思维链/输出结束后立即用精确累计替换
+        // 流式估算，避免状态栏在子 Agent 结束后塌回回合前状态）。
+        if let Some(acc) = snapshot_usage(sink) {
+            let cost = settings.pricing.estimate(&acc, &model);
+            term::println_err(&crate::client::format_usage_cost(&acc, cost.as_ref()));
+            let mut u = serde_json::json!({
+                "input": acc.prompt_tokens,
+                "output": acc.completion_tokens,
+                "cache_hit_tokens": acc.cache_hit_tokens,
+            });
+            if let Some(c) = &cost {
+                u["cost"] = serde_json::json!({ "currency": c.currency, "amount": c.amount });
             }
+            if let Some((used, limit, warn, currency)) = app.budget_snapshot() {
+                u["budget"] = serde_json::json!({ "used": used, "limit": limit, "warn": warn, "currency": currency });
+            }
+            term::send_usage_turn(&u.to_string());
         }
 
         if result.interrupted {
@@ -483,7 +529,7 @@ pub async fn run_turn(
             return Ok(TurnResult {
                 text: String::new(),
                 interrupted: true,
-                usage: total_usage,
+                usage: take_or_snapshot(sink, is_top),
             });
         }
 
@@ -503,7 +549,7 @@ pub async fn run_turn(
             return Ok(TurnResult {
                 text,
                 interrupted: false,
-                usage: total_usage,
+                usage: take_or_snapshot(sink, is_top),
             });
         }
 
@@ -520,7 +566,7 @@ pub async fn run_turn(
                 return Ok(TurnResult {
                     text: String::new(),
                     interrupted: true,
-                    usage: total_usage,
+                    usage: take_or_snapshot(sink, is_top),
                 });
             }
             let name = &call.function.name;
@@ -600,7 +646,7 @@ pub async fn run_turn(
                 return Ok(TurnResult {
                     text: String::new(),
                     interrupted: true,
-                    usage: total_usage,
+                    usage: take_or_snapshot(sink, is_top),
                 });
             }
         }
@@ -620,6 +666,7 @@ async fn compact_context(
     messages: &mut Vec<Message>,
     cancel: &CancelFlag,
     progress_tx: Option<&tokio::sync::mpsc::UnboundedSender<Vec<Message>>>,
+    sink: &UsageSink,
 ) -> Result<()> {
     let Some(client) = app.client_for(crate::config::COMPACTOR) else {
         bail!(
@@ -648,11 +695,13 @@ async fn compact_context(
         .await
         .context("上下文压缩失败")?;
     anyhow::ensure!(!result.interrupted, "上下文压缩被中止");
-    // 压缩调用也计入费用预算
-    if let Some(u) = &result.usage
-        && let Some(c) = compactor_settings.pricing.estimate(u, &model) {
+    // 压缩调用也计入费用预算，并并入回合用量统计（父回合 drain 时收取）
+    if let Some(u) = &result.usage {
+        if let Some(c) = compactor_settings.pricing.estimate(u, &model) {
             app.budget_accumulate(c.amount, &c.currency).await;
         }
+        merge_usage(&mut sink.lock().unwrap(), u);
+    }
     let summary = result.message.content.unwrap_or_default();
     anyhow::ensure!(!summary.trim().is_empty(), "compactor 返回空摘要");
 
@@ -1239,6 +1288,7 @@ async fn call_sub_agent(
         true,   // 子 Agent 显示思维链
         cancel, // 透传 supervisor 的打断信号
         None,   // 子 Agent 不做增量保存
+        ctx.usage_sink.as_ref(), // 用量并入父回合统计
     )
     .await;
 
@@ -1337,6 +1387,45 @@ mod tests {
         assert!(parse_result("完成\nRESULT: OK"));
         assert!(!parse_result("RESULT: FAILED: 编译不过"));
         assert!(parse_result("没有标志也算成功"));
+    }
+
+    #[test]
+    fn usage_sink_shared_accumulation() {
+        let u1 = ChatUsage {
+            prompt_tokens: 1,
+            completion_tokens: 2,
+            total_tokens: 3,
+            cache_hit_tokens: Some(1),
+            cache_miss_tokens: None,
+        };
+        // 顶层与子 Agent / compactor 都并入同一 sink
+        let sink: UsageSink = Arc::new(Mutex::new(None));
+        merge_usage(&mut sink.lock().unwrap(), &u1);
+        merge_usage(&mut sink.lock().unwrap(), &u1);
+        merge_usage(&mut sink.lock().unwrap(), &u1);
+
+        // 任意一步结束：快照 = 至今累计
+        let snap = snapshot_usage(&sink).unwrap();
+        assert_eq!(snap.prompt_tokens, 3);
+        assert_eq!(snap.completion_tokens, 6);
+        assert_eq!(snap.cache_hit_tokens, Some(3));
+        // 快照不消耗 sink
+        assert!(sink.lock().unwrap().is_some());
+
+        // 子 Agent 返回：快照（不取走，父回合继续累积）
+        let nested = take_or_snapshot(&sink, false).unwrap();
+        assert_eq!(nested.completion_tokens, 6);
+        assert!(sink.lock().unwrap().is_some());
+
+        // 顶层返回：取走（回合结束）
+        let top = take_or_snapshot(&sink, true).unwrap();
+        assert_eq!(top.completion_tokens, 6);
+        assert!(sink.lock().unwrap().is_none());
+
+        // 全零用量视为无用量
+        let zero = ChatUsage { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, cache_hit_tokens: None, cache_miss_tokens: None };
+        merge_usage(&mut sink.lock().unwrap(), &zero);
+        assert!(snapshot_usage(&sink).is_none());
     }
 
     #[test]

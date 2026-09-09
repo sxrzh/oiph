@@ -21,7 +21,7 @@
 //!   客户端与内置压缩提示词
 
 use std::collections::HashMap;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 use anyhow::{Context, Result, anyhow, bail};
 use serde::Deserialize;
@@ -106,10 +106,9 @@ impl Default for AgentSettings {
 
 /// 展开 `~` 前缀。
 pub fn expand_tilde(path: &str) -> PathBuf {
-    if let Some(rest) = path.strip_prefix("~/")
-        && let Some(home) = std::env::var_os("HOME") {
-            return Path::new(&home).join(rest);
-        }
+    if let Some(rest) = path.strip_prefix("~/") {
+        return crate::paths::user_home().join(rest);
+    }
     PathBuf::from(path)
 }
 

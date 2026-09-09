@@ -10,8 +10,8 @@ static FX_CACHE: Mutex<Option<HashMap<(String, String), f64>>> = Mutex::new(None
 /// 兜底汇率（网络失败时使用；覆盖常用 CNY/USD，其余按 1.0 并告警）。
 fn fallback_rate(from: &str, to: &str) -> f64 {
     match (from, to) {
-        ("CNY", "USD") => 0.14,
-        ("USD", "CNY") => 7.2,
+        ("CNY", "USD") => 0.15,
+        ("USD", "CNY") => 6.71,
         _ => 1.0,
     }
 }

@@ -47,6 +47,9 @@ pub struct ToolContext {
     pub skill_roots: Vec<PathBuf>,
     /// 查重后端。
     pub dup_backend: crate::dupcheck::Backend,
+    /// 回合共享用量累积器（顶层回合由 run_turn 注入；子 Agent 模型调用
+    /// 用量据此并入父回合统计）。非 Agent 工具路径为 None。
+    pub usage_sink: Option<crate::agent::UsageSink>,
 }
 
 impl ToolContext {
@@ -594,6 +597,7 @@ mod tests {
             kb_dirs: vec![std::env::temp_dir().join("oiph-test-nonexistent-kb")],
             skill_roots: vec![std::env::temp_dir().join("oiph-test-nonexistent-skills")],
             dup_backend: crate::dupcheck::Backend::Cpret,
+            usage_sink: None,
         }
     }
 

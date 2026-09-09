@@ -1,6 +1,6 @@
 [package]
 name = "oiph"
-version = "0.1.0"
+version = "0.1.4"
 edition = "2024"
 
 [dependencies]
@@ -9,6 +9,7 @@ axum = { version = "0.8", features = ["ws"] }
 base64 = "0.22"
 chrono = { version = "0.4", features = ["serde"] }
 clap = { version = "4", features = ["derive", "env"] }
+home = "0.5"
 crossterm = "0.28"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "stream"] }
 rustyline = "15"

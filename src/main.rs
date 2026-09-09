@@ -121,6 +121,10 @@ enum Commands {
         /// 缺省依次尝试 ./assets 与可执行文件旁的 assets
         #[arg(long)]
         assets: Option<String>,
+        /// 为指定用户安装（写入其家目录下的 .oiph 并修正属主；安装到其他用户
+        /// 家目录需要 root/sudo）。例：sudo oiph init --force --user alice
+        #[arg(long)]
+        user: Option<String>,
     },
     /// 费用预算管理（~/.oiph/config/limit.json）。
     Fee {
@@ -367,8 +371,8 @@ async fn main() -> Result<()> {
         Some(Commands::Prompt { cmd }) => return run_prompt_cmd(cmd),
         Some(Commands::Session { cmd }) => return run_session_cmd(&cli, cmd),
         Some(Commands::Fee { cmd }) => return run_fee_cmd(cmd),
-        Some(Commands::Init { force, assets }) => {
-            return initcmd::run_init(*force, assets.as_deref()).await;
+        Some(Commands::Init { force, assets, user }) => {
+            return initcmd::run_init(*force, assets.as_deref(), user.as_deref()).await;
         }
         Some(Commands::Export { cmd }) => return run_export_cmd(&cli, cmd),
         Some(Commands::Test { problem }) => return run_test_cmd(&cli, problem.as_deref()),
@@ -849,6 +853,7 @@ async fn run_repl(cli: &Cli, root: &Path) -> Result<()> {
             true,  // supervisor 显示思维链
             &cancel,
             Some(&save_tx),
+            None, // 顶层回合：自建共享用量 sink
         )
         .await;
         drop(save_tx);
@@ -1361,8 +1366,7 @@ fn new_editor() -> Editor<(), rustyline::history::FileHistory> {
 }
 
 fn dirs_for_history() -> std::path::PathBuf {
-    let home = std::env::var_os("HOME").map(std::path::PathBuf::from).unwrap_or_else(std::env::temp_dir);
-    home.join(".oiph").join("history.txt")
+    paths::user_home().join(".oiph").join("history.txt")
 }
 
 fn repl_readline(rl: &mut Editor<(), rustyline::history::FileHistory>) -> Result<Option<String>> {

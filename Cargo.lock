@@ -1072,7 +1072,7 @@ dependencies = [
 
 [[package]]
 name = "oiph"
-version = "0.1.0"
+version = "0.1.4"
 dependencies = [
  "anyhow",
  "axum",
@@ -1080,6 +1080,7 @@ dependencies = [
  "chrono",
  "clap",
  "crossterm",
+ "home",
  "reqwest",
  "rustyline",
  "scraper",

@@ -363,7 +363,7 @@ mod tests {
             uid: "a".into(), title: "t".into(), src: "s".into(),
             url: "u".into(), cos: 0.9, original: None, t0: None,
         };
-        assert!(is_likely_duplicate(&[r.clone()]));
+        assert!(is_likely_duplicate(std::slice::from_ref(&r)));
         let r2 = SearchResult { cos: 0.8, ..r };
         assert!(!is_likely_duplicate(&[r2]));
         assert!(!is_likely_duplicate(&[]));

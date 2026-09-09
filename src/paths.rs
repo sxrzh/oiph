@@ -1,15 +1,60 @@
 //! 固定路径：全局与工程两级的知识库 / skills / vendor 目录。
 
 use std::path::{Path, PathBuf};
+use std::sync::OnceLock;
 
-use anyhow::Context;
+use anyhow::{Context, bail};
+
+/// `--user` 指定的家目录覆盖（仅 `oiph init --user` 进程内生效）。
+static HOME_OVERRIDE: OnceLock<PathBuf> = OnceLock::new();
+
+/// 注册家目录覆盖（init --user 用；重复注册报错）。
+pub fn set_home_override(home: PathBuf) -> anyhow::Result<()> {
+    HOME_OVERRIDE
+        .set(home.clone())
+        .map_err(|_| anyhow::anyhow!("家目录覆盖已被设置过：{}", home.display()))
+}
+
+/// 当前生效的家目录：覆盖值 > `home` crate（HOME 环境变量，缺省时回退
+/// getpwuid 按当前用户查询）> 临时目录。
+pub fn user_home() -> PathBuf {
+    if let Some(h) = HOME_OVERRIDE.get() {
+        return h.clone();
+    }
+    home::home_dir().unwrap_or_else(std::env::temp_dir)
+}
+
+/// 查询指定用户的家目录（getent passwd，缺 getent 时直接解析 /etc/passwd）。
+pub fn lookup_user_home(name: &str) -> anyhow::Result<PathBuf> {
+    let parse_line = |line: &str| -> Option<PathBuf> {
+        line.trim()
+            .split(':')
+            .nth(5)
+            .filter(|h| !h.is_empty())
+            .map(PathBuf::from)
+    };
+    // NSS 感知（LDAP 等）；BusyBox/Alpine 也有 getent
+    if let Ok(out) = std::process::Command::new("getent").arg("passwd").arg(name).output()
+        && out.status.success()
+        && let Some(home) = String::from_utf8_lossy(&out.stdout).lines().find_map(parse_line)
+    {
+        return Ok(home);
+    }
+    // 兜底：直接解析 /etc/passwd（macOS 本地用户也在其中）
+    if let Ok(passwd) = std::fs::read_to_string("/etc/passwd")
+        && let Some(home) = passwd
+            .lines()
+            .find(|l| l.split(':').next() == Some(name))
+            .and_then(parse_line)
+    {
+        return Ok(home);
+    }
+    bail!("无法解析用户 {name} 的家目录（用户不存在？）")
+}
 
 /// 全局配置根目录：`$HOME/.oiph`。
 pub fn oiph_home() -> PathBuf {
-    let home = std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir);
-    home.join(".oiph")
+    user_home().join(".oiph")
 }
 
 /// 全局知识库目录。
@@ -108,5 +153,22 @@ pub(crate) mod tests {
         assert!(super::project_kb_dir(p).ends_with(".oiph/kb"));
         assert!(super::project_skills_dir(p).ends_with(".oiph/skills"));
         assert!(super::global_kb_dir().starts_with(super::oiph_home()));
+    }
+
+    #[test]
+    fn lookup_user_home_root_and_unknown() {
+        assert!(super::lookup_user_home("root").is_ok());
+        let err = super::lookup_user_home("oiph_no_such_user_xyz").unwrap_err();
+        assert!(err.to_string().contains("无法解析用户"));
+    }
+
+    #[test]
+    fn user_home_follows_home_crate() {
+        // 未设置 override 时与 home crate 一致（不做 HOME 环境变量变更，
+        // 避免与其它沙盒测试竞态）
+        let expected = home::home_dir()
+            .unwrap_or_else(std::env::temp_dir)
+            .join(".oiph");
+        assert_eq!(super::oiph_home(), expected);
     }
 }

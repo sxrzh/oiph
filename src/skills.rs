@@ -193,22 +193,22 @@ description: Review Rust code for correctness.
 
         // 标准 frontmatter
         write_skill(&d, "a", SAMPLE);
-        let skills = discover(&[d.clone()]);
+        let skills = discover(std::slice::from_ref(&d));
         assert_eq!(skills.len(), 1);
         assert_eq!(skills[0].name, "rust-code-review");
         assert_eq!(skills[0].description, "Review Rust code for correctness.");
 
         // 无 frontmatter：名称用目录名，描述用首个正文行
         write_skill(&d, "b", "# 对拍\n\n内容");
-        let skills = discover(&[d.clone()]);
+        let skills = discover(std::slice::from_ref(&d));
         assert_eq!(skills.len(), 2);
         let b = skills.iter().find(|s| s.name == "b").unwrap();
         assert_eq!(b.description, "对拍");
 
         // 加载全文
-        let full = load_content(&[d.clone()], "rust-code-review").unwrap();
+        let full = load_content(std::slice::from_ref(&d), "rust-code-review").unwrap();
         assert!(full.contains("Workflow"));
-        assert!(load_content(&[d.clone()], "nope").is_err());
+        assert!(load_content(std::slice::from_ref(&d), "nope").is_err());
 
         std::fs::remove_dir_all(&d).ok();
     }

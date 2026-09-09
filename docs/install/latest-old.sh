@@ -1,22 +1,20 @@
 #!/usr/bin/env bash
+#
+# This is deprecated, just for archive.
+#
 # ============================================================================
 # OIPH 一键安装脚本（从 GitHub Release 安装最新版）
 #
 # 用法：
 #   curl -fsSL https://raw.githubusercontent.com/sxrzh/oiph/main/docs/install/latest.sh | bash
-#   bash latest.sh [--user 用户名]
-#
-# 选项：
-#   --user 用户名   为指定用户安装（写入其 ~/.oiph 并修正属主）。
-#                   缺省：sudo 运行时取 SUDO_USER，否则当前用户；
-#                   为其他用户安装需要 root/sudo 权限。
+#   （或先下载后执行：bash latest.sh）
 #
 # 功能：
 #   1. 检测本机架构，选择对应的发布包（Linux 为 musl 静态链接，无 glibc 依赖）
-#   2. 若已安装（/usr/local/bin/oiph 或目标用户 ~/.oiph 存在）则询问是否继续
+#   2. 若已安装（/usr/local/bin/oiph 或 ~/.oiph 存在）则询问是否继续
 #   3. 通过 GitHub API 获取最新 release，下载合适架构的 zip 并解压
 #   4. sudo cp 安装 oiph 到 /usr/local/bin
-#   5. 运行 oiph init --force --user <目标用户> 安装配置（skills/kb/prompts/vendor/前端）
+#   5. 运行 oiph init --force 安装配置（skills/kb/prompts/vendor/前端）
 #
 # 说明：init --force 会覆盖 ~/.oiph 中已有的 skills / prompts / vendor 与前端，
 #       但不会覆盖 agents.json 与 limit.json（请自行在设置页或文件中配置模型）。
@@ -33,54 +31,6 @@ say() { printf "${c_cyan}[oiph]${c_off} %s\n" "$*"; }
 ok()  { printf "${c_green}[oiph]${c_off} %s\n" "$*"; }
 warn(){ printf "${c_yellow}[oiph] 警告：${c_off}%s\n" "$*" >&2; }
 die() { printf "${c_red}[oiph] 错误：${c_off}%s\n" "$*" >&2; exit 1; }
-
-usage() {
-  sed -n '2,22p' "$0" | sed 's/^# \{0,1\}//'
-}
-
-# ---------------------------------------------------------------------------
-# 0. 解析参数与目标用户
-# ---------------------------------------------------------------------------
-TARGET_USER="${OIPH_USER:-}"
-while [ $# -gt 0 ]; do
-  case "$1" in
-    --user)
-      [ $# -ge 2 ] || die "--user 需要一个用户名参数"
-      TARGET_USER="$2"; shift 2 ;;
-    --user=*)
-      TARGET_USER="${1#--user=}"; shift ;;
-    -h | --help)
-      usage; exit 0 ;;
-    *)
-      die "未知参数：$1（用法：latest.sh [--user 用户名]，详见 --help）" ;;
-  esac
-done
-
-CUR_USER="$(id -un)"
-if [ -z "$TARGET_USER" ]; then
-  # sudo 运行时默认装给发起 sudo 的真实用户，而不是 root
-  TARGET_USER="${SUDO_USER:-$CUR_USER}"
-fi
-[ "$TARGET_USER" = root ] && warn "目标用户是 root（~root/.oiph）。若要装给普通用户，请加 --user 用户名。"
-
-# 查询用户家目录：getent（NSS 感知）优先，缺 getent 时用 shell 的 ~user 展开
-user_home() {
-  if command -v getent >/dev/null 2>&1; then
-    getent passwd "$1" 2>/dev/null | cut -d: -f6
-  else
-    eval echo "~$1" 2>/dev/null
-  fi
-}
-TARGET_HOME="$(user_home "$TARGET_USER" || true)"
-case "$TARGET_HOME" in
-  "" | "~"*) die "无法解析用户 $TARGET_USER 的家目录（用户不存在？）" ;;
-esac
-say "目标用户：$TARGET_USER（家目录 $TARGET_HOME）"
-
-# 为其他用户安装需要 root（写入其家目录并修正属主）
-if [ "$TARGET_USER" != "$CUR_USER" ] && [ "$(id -u)" -ne 0 ]; then
-  die "为其他用户（$TARGET_USER）安装需要 root 权限：请用 sudo bash $0 --user $TARGET_USER"
-fi
 
 # ---------------------------------------------------------------------------
 # 1. 检测架构并选择发布包
@@ -99,9 +49,9 @@ say "检测到平台：$OS $ARCH → 安装包：$ASSET"
 # ---------------------------------------------------------------------------
 # 2. 已安装则询问
 # ---------------------------------------------------------------------------
-if [ -x "$INSTALL_DIR/oiph" ] || [ -d "$TARGET_HOME/.oiph" ]; then
-  warn "检测到本机已安装 oiph（$INSTALL_DIR/oiph 或 $TARGET_HOME/.oiph 已存在）。"
-  warn "继续将：覆盖 $INSTALL_DIR/oiph 二进制，并以 --force 重置 $TARGET_HOME/.oiph（skills/prompts/vendor/前端）。"
+if [ -x "$INSTALL_DIR/oiph" ] || [ -d "$HOME/.oiph" ]; then
+  warn "检测到本机已安装 oiph（$INSTALL_DIR/oiph 或 ~/.oiph 已存在）。"
+  warn "继续将：覆盖 $INSTALL_DIR/oiph 二进制，并以 --force 重置 ~/.oiph（skills/prompts/vendor/前端）。"
   read -r -p "是否继续？[y/N] " ans
   case "$ans" in
     y | Y | yes | YES) ;;
@@ -160,19 +110,17 @@ $SUDO chmod 755 "$INSTALL_DIR/oiph"
 
 # ---------------------------------------------------------------------------
 # 6. 初始化配置（在当前解压目录执行，便于发现 ./assets 与 ./frontend/dist）
-#    --user 让 oiph 解析目标用户家目录并修正属主（root 代装场景）
 # ---------------------------------------------------------------------------
-say "运行 oiph init --force --user $TARGET_USER 安装配置（skills / kb / prompts / vendor / 前端）…"
-"$INSTALL_DIR/oiph" init --force --user "$TARGET_USER" || die "oiph init 失败"
+say "运行 oiph init --force 安装配置（skills / kb / prompts / vendor / 前端）…"
+"$INSTALL_DIR/oiph" init --force || die "oiph init 失败"
 
 # ---------------------------------------------------------------------------
-ok "安装完成（用户：$TARGET_USER）！"
+ok "安装完成！"
 echo
 echo "  启动 Web 界面：        oiph            （浏览器访问 http://localhost:17217）"
 echo "  命令行交互：           oiph cli"
 echo "  查看帮助：             oiph --help / oiph --version"
 echo
-echo "  下一步：以用户 $TARGET_USER 登录，在 Web 界面的『设置』中配置每个 agent 的"
-echo "  Base URL / API Key / 模型，或设置环境变量 OPENAI_BASE_URL / OPENAI_API_KEY /"
-echo "  OPENAI_MODEL。安装脚本不会改动 agents.json 与 limit.json（预算），"
-echo "  可随时用 oiph fee reset 重置预算。"
+echo "  下一步：在 Web 界面的『设置』中配置每个 agent 的 Base URL / API Key / 模型，"
+echo "  或设置环境变量 OPENAI_BASE_URL / OPENAI_API_KEY / OPENAI_MODEL。"
+echo "  安装脚本不会改动 agents.json 与 limit.json（预算），可随时用 oiph fee reset 重置预算。"

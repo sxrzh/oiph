@@ -10,6 +10,12 @@ curl -fsSL http://sxrzh.github.io/oiph/install/latest.sh | bash
 ```
 支持 x86_64 Linux, arm64 Linux, MacOS。
 
+为指定用户安装（缺省：sudo 运行时装给 SUDO_USER，否则当前用户）：
+```sh
+curl -fsSL http://sxrzh.github.io/oiph/install/latest.sh | bash -s -- --user alice
+# 或下载后执行：bash latest.sh --user alice
+```
+
 ### Docker 镜像  
 > Coming soon.
 

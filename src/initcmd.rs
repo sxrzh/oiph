@@ -4,6 +4,8 @@
 //! - 构建全局知识库（assets/kb 递归，来源标签 `<builtin>/<相对路径>`）
 //! - 安装 vendor（testlib.h / testlib_lemon.h）
 //! - 生成 limit.json 与 agents.json（仅当不存在时，`--force` 也不覆盖）
+//! - `--user <name>`：为指定用户安装（写入其家目录并修正属主），便于
+//!   `sudo oiph init --user alice` 这类场景
 
 use std::path::{Path, PathBuf};
 
@@ -69,7 +71,15 @@ fn copy_dir_contents(src: &Path, dst: &Path) -> Result<()> {
 }
 
 /// 执行初始化。返回无。
-pub async fn run_init(force: bool, assets: Option<&str>) -> Result<()> {
+///
+/// `user` 非空时为指定用户安装：解析其家目录作为本次进程的全局目录，
+/// 并在安装完成后尝试 `chown -R <user>`（root 代装时修正属主；失败仅告警）。
+pub async fn run_init(force: bool, assets: Option<&str>, user: Option<&str>) -> Result<()> {
+    if let Some(name) = user {
+        let target_home = paths::lookup_user_home(name)?;
+        paths::set_home_override(target_home)?;
+        eprintln!("为用户 {name} 安装：{}", paths::oiph_home().display());
+    }
     let assets_dir = resolve_assets_dir(assets)?;
     let home = paths::oiph_home();
     std::fs::create_dir_all(&home)?;
@@ -212,8 +222,30 @@ pub async fn run_init(force: bool, assets: Option<&str>) -> Result<()> {
     //    来源依次尝试：<assets>/frontend/dist、./frontend/dist、<exe>/frontend/dist
     install_frontend(&assets_dir, force)?;
 
+    // 8. --user：修正属主（root 为其他用户代装时文件会带 root 属主）
+    if let Some(name) = user {
+        chown_home(name, &home);
+    }
+
     println!("初始化完成。全局配置目录：{}", home.display());
     Ok(())
+}
+
+/// 递归修改 `~/.oiph` 属主（`chown -R <user> <path>`）。
+/// 非 root 时改自己的目录属主是无害空操作；失败（无权限等）仅告警不中断。
+fn chown_home(user: &str, home: &Path) {
+    let status = std::process::Command::new("chown")
+        .arg("-R")
+        .arg(user)
+        .arg(home)
+        .status();
+    match status {
+        Ok(s) if s.success() => println!("✓ 属主已设为 {user}"),
+        _ => eprintln!(
+            "警告：chown -R {user} {} 失败，该用户可能无法写入；请手动执行",
+            home.display()
+        ),
+    }
 }
 
 /// 安装 Web 前端到 `~/.oiph/frontend/dist`。

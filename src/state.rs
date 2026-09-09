@@ -295,6 +295,7 @@ impl App {
             kb_dirs: self.kb_dirs(),
             skill_roots: self.skill_roots(),
             dup_backend: self.dup_backend,
+            usage_sink: None, // 顶层回合由 run_turn 注入
         }
     }
 

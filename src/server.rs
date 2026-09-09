@@ -600,6 +600,7 @@ async fn handle_ws(mut socket: WebSocket, st: Arc<ServerState>) {
                     true,
                     &st_agent.cancel,
                     Some(&save_tx),
+                    None, // 顶层回合：自建共享用量 sink
                 )
                 .await
             };
@@ -637,6 +638,19 @@ async fn handle_ws(mut socket: WebSocket, st: Arc<ServerState>) {
                         "[server] 回合结束 interrupted={}",
                         turn_result.interrupted
                     );
+                    if let Some(u) = &turn_result.usage {
+                        eprintln!(
+                            "[server] 用量基线更新：输入 {} / 输出 {}（本回合 +输入 {} / +输出 {}）",
+                            total_usage(&st_agent).prompt_tokens,
+                            total_usage(&st_agent).completion_tokens,
+                            u.prompt_tokens,
+                            u.completion_tokens,
+                        );
+                    } else {
+                        eprintln!(
+                            "[server] 警告：回合没有返回用量（usage=None），基线不变"
+                        );
+                    }
                 }
                 Err(e) => {
                     let _ = tx_agent.send(
@@ -782,20 +796,37 @@ async fn save_session(st: &ServerState) {
         let mut pending = st.pending_usage.lock().unwrap();
         std::mem::take(&mut *pending)
     };
-    if session_mod::save_messages(d, &name, &msgs, &add_usage).is_ok() {
-        let mut saved = st.saved_usage.lock().unwrap();
-        saved.prompt_tokens += add_usage.prompt_tokens;
-        saved.completion_tokens += add_usage.completion_tokens;
-        saved.total_tokens += add_usage.total_tokens;
-        saved.cache_hit_tokens = match (saved.cache_hit_tokens, add_usage.cache_hit_tokens) {
+    if let Err(e) = session_mod::save_messages(d, &name, &msgs, &add_usage) {
+        eprintln!(
+            "[server] 会话保存失败（用量未落盘，已退回内存统计）：{e:#}"
+        );
+        // 落盘失败时把用量退回 pending，保证内存基线与状态栏统计不丢
+        let mut pending = st.pending_usage.lock().unwrap();
+        pending.prompt_tokens += add_usage.prompt_tokens;
+        pending.completion_tokens += add_usage.completion_tokens;
+        pending.total_tokens += add_usage.total_tokens;
+        pending.cache_hit_tokens = match (pending.cache_hit_tokens, add_usage.cache_hit_tokens) {
             (Some(a), Some(b)) => Some(a + b),
             (a, b) => a.or(b),
         };
-        saved.cache_miss_tokens = match (saved.cache_miss_tokens, add_usage.cache_miss_tokens) {
+        pending.cache_miss_tokens = match (pending.cache_miss_tokens, add_usage.cache_miss_tokens) {
             (Some(a), Some(b)) => Some(a + b),
             (a, b) => a.or(b),
         };
+        return;
     }
+    let mut saved = st.saved_usage.lock().unwrap();
+    saved.prompt_tokens += add_usage.prompt_tokens;
+    saved.completion_tokens += add_usage.completion_tokens;
+    saved.total_tokens += add_usage.total_tokens;
+    saved.cache_hit_tokens = match (saved.cache_hit_tokens, add_usage.cache_hit_tokens) {
+        (Some(a), Some(b)) => Some(a + b),
+        (a, b) => a.or(b),
+    };
+    saved.cache_miss_tokens = match (saved.cache_miss_tokens, add_usage.cache_miss_tokens) {
+        (Some(a), Some(b)) => Some(a + b),
+        (a, b) => a.or(b),
+    };
 }
 
 // ---------------------------------------------------------------------------

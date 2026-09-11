@@ -1,4 +1,38 @@
 :root {
+  /* 浅色主题（默认） */
+  --bg: #f5f7fa;
+  --bg-panel: #ffffff;
+  --bg-tab: #eef2f7;
+  --bg-input: #ffffff;
+  --fg: #1f2937;
+  --fg-muted: #6b7280;
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+  --border: #d8e0ea;
+  --green: #16a34a;
+  --yellow: #d97706;
+  --red: #dc2626;
+  --gray: #9ca3af;
+  --msg-user-bg: #dbeafe;
+  --msg-agent-bg: #ffffff;
+  --msg-tool-bg: #f1f5f9;
+  --code-bg: #f1f5f9;
+  --hover-bg: #e8eef7;
+  --btn-hover-bg: #dbeafe;
+  --link: #2563eb;
+  --status-gray-bg: #e5e7eb;
+  --status-gray-fg: #4b5563;
+  --status-yellow-bg: #fef3c7;
+  --status-yellow-fg: #b45309;
+  --status-green-bg: #dcfce7;
+  --status-green-fg: #15803d;
+  --status-red-bg: #fee2e2;
+  --status-red-fg: #b91c1c;
+  --error-fg: #c2410c;
+}
+
+:root[data-theme='dark'] {
+  /* 深色主题 */
   --bg: #1a1a2e;
   --bg-panel: #16213e;
   --bg-tab: #0d1b2a;
@@ -6,11 +40,28 @@
   --fg: #e0e0e0;
   --fg-muted: #888;
   --accent: #e94560;
+  --accent-hover: #ff5577;
   --border: #0f3460;
   --green: #0a0;
   --yellow: #fa0;
   --red: #a00;
   --gray: #666;
+  --msg-user-bg: #0f3460;
+  --msg-agent-bg: #1e2a3a;
+  --msg-tool-bg: #0d1b2a;
+  --code-bg: #0d1b2a;
+  --hover-bg: #1e2a3a;
+  --btn-hover-bg: #1a4a8a;
+  --link: #7ec8e3;
+  --status-gray-bg: #333;
+  --status-gray-fg: #aaa;
+  --status-yellow-bg: #553;
+  --status-yellow-fg: #ff0;
+  --status-green-bg: #243;
+  --status-green-fg: #0f0;
+  --status-red-bg: #422;
+  --status-red-fg: #f44;
+  --error-fg: #fb923c;
 }
 
 * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -50,7 +101,7 @@ body {
   cursor: pointer;
   font-size: 13px;
 }
-.menubar button:hover { background: #1a4a8a; }
+.menubar button:hover { background: var(--btn-hover-bg); }
 
 .main { display: flex; flex: 1; overflow: hidden; }
 
@@ -155,10 +206,12 @@ body {
   word-break: break-word;
   white-space: pre-wrap;
 }
-.msg.user { align-self: flex-end; background: var(--border); }
-.msg.assistant, .msg.tool, .msg.system { align-self: flex-start; background: #1e2a3a; }
+.msg.user { align-self: flex-end; background: var(--msg-user-bg); }
+.msg.assistant, .msg.tool, .msg.system, .msg.error { align-self: flex-start; background: var(--msg-agent-bg); border: 1px solid var(--border); }
+.msg.error { color: var(--error-fg); }
+.msg.error .role-tag { color: var(--error-fg); opacity: 0.85; }
 .msg .role-tag { font-size: 11px; color: var(--fg-muted); margin-bottom: 2px; }
-.msg.tool { font-family: monospace; font-size: 12px; background: var(--bg-tab); }
+.msg.tool { font-family: monospace; font-size: 12px; background: var(--msg-tool-bg); }
 
 /* 运行中工具：呼吸边框 + 计时徽标动态渐变 */
 .msg.msg-running {
@@ -229,7 +282,7 @@ body {
   font-size: 13px;
   white-space: nowrap;
 }
-.btn-send:hover { background: #ff5577; }
+.btn-send:hover { background: var(--accent-hover); }
 .btn-stop { background: var(--red); }
 
 .session-bar {
@@ -258,7 +311,7 @@ body {
 }
 
 table { border-collapse: collapse; width: 100%; margin: 4px 0; }
-th, td { border: 1px solid #333; padding: 4px 8px; text-align: left; font-size: 12px; }
+th, td { border: 1px solid var(--border); padding: 4px 8px; text-align: left; font-size: 12px; }
 th { background: var(--bg-tab); }
 
 textarea.editor {
@@ -266,7 +319,7 @@ textarea.editor {
   min-height: 200px;
   background: var(--bg-tab);
   color: var(--fg);
-  border: 1px solid #333;
+  border: 1px solid var(--border);
   border-radius: 4px;
   padding: 8px;
   font-family: 'Cascadia Code', 'Fira Code', monospace;
@@ -283,15 +336,16 @@ textarea.editor {
   cursor: pointer;
   font-size: 12px;
 }
-.btn:hover { background: #1a4a8a; }
+.btn:hover { background: var(--btn-hover-bg); }
 
 .file-link {
-  color: #7ec8e3;
+  color: var(--link);
   cursor: pointer;
   text-decoration: underline;
 }
 
 .spoiler { margin: 4px 0; }
+.tool-sections { display: flex; flex-direction: column; gap: 4px; }
 .spoiler-header {
   cursor: pointer;
   display: flex;
@@ -312,19 +366,19 @@ textarea.editor {
 }
 .markdown-preview p { margin: 4px 0; }
 .markdown-preview code {
-  background: #0d1b2a;
+  background: var(--code-bg);
   padding: 2px 4px;
   border-radius: 2px;
   font-family: monospace;
 }
 .markdown-preview pre {
-  background: #0d1b2a;
+  background: var(--code-bg);
   padding: 8px;
   border-radius: 4px;
   overflow: auto;
 }
 .markdown-preview table { border-collapse: collapse; }
-.markdown-preview th, .markdown-preview td { border: 1px solid #333; padding: 4px; }
+.markdown-preview th, .markdown-preview td { border: 1px solid var(--border); padding: 4px; }
 
 .status-cell {
   padding: 2px 6px;
@@ -332,16 +386,16 @@ textarea.editor {
   font-size: 11px;
   display: inline-block;
 }
-.status-cell.gray { background: #333; color: #aaa; }
-.status-cell.yellow { background: #553; color: #ff0; }
-.status-cell.green { background: #243; color: #0f0; }
-.status-cell.red { background: #422; color: #f44; }
+.status-cell.gray { background: var(--status-gray-bg); color: var(--status-gray-fg); }
+.status-cell.yellow { background: var(--status-yellow-bg); color: var(--status-yellow-fg); }
+.status-cell.green { background: var(--status-green-bg); color: var(--status-green-fg); }
+.status-cell.red { background: var(--status-red-bg); color: var(--status-red-fg); }
 
 /* 问卷控件 */
 .questionnaire {
   margin: 0 12px 8px;
   padding: 10px 12px;
-  background: #1e2a3a;
+  background: var(--bg-panel);
   border: 1px solid var(--accent);
   border-radius: 8px;
 }
@@ -367,14 +421,14 @@ textarea.editor {
 /* 对话区 agent 消息 Markdown 渲染 */
 .md-body p { margin: 4px 0; }
 .md-body pre {
-  background: #0d1b2a;
+  background: var(--code-bg);
   padding: 8px;
   border-radius: 4px;
   overflow-x: auto;
   font-size: 12px;
 }
 .md-body code {
-  background: #0d1b2a;
+  background: var(--code-bg);
   padding: 1px 4px;
   border-radius: 2px;
   font-size: 12px;
@@ -399,16 +453,16 @@ textarea.editor {
   flex-direction: column;
   min-height: 0;
   overflow-y: auto;
-  background: var(--bg-tab, #16202e);
-  border: 1px solid var(--border, #2a3a50);
+  background: var(--bg-tab, #eef2f7);
+  border: 1px solid var(--border, #d8e0ea);
   border-radius: 6px;
   padding: 10px;
 }
 .settings-pane h2 { margin: 0 0 6px; font-size: 15px; }
 .settings-pane h3 { margin: 8px 0 4px; font-size: 13px; }
-.settings-pane .hint { font-size: 12px; color: var(--fg-muted, #8aa); margin: 2px 0 8px; }
+.settings-pane .hint { font-size: 12px; color: var(--fg-muted, #6b7280); margin: 2px 0 8px; }
 .settings-card {
-  border: 1px solid var(--border, #2a3a50);
+  border: 1px solid var(--border, #d8e0ea);
   border-radius: 4px;
   padding: 8px;
   margin-bottom: 10px;
@@ -416,11 +470,11 @@ textarea.editor {
   flex-direction: column;
   gap: 4px;
 }
-.settings-card label, .settings-pane > label { font-size: 12px; color: var(--fg-muted, #8aa); }
+.settings-card label, .settings-pane > label { font-size: 12px; color: var(--fg-muted, #6b7280); }
 .settings-card input, .settings-card select {
-  background: #0d1622;
-  color: var(--fg, #dde);
-  border: 1px solid var(--border, #2a3a50);
+  background: var(--bg-input);
+  color: var(--fg);
+  border: 1px solid var(--border);
   border-radius: 4px;
   padding: 4px 6px;
   font-size: 12px;
@@ -444,10 +498,10 @@ textarea.editor {
   border-radius: 4px;
   font-size: 12px;
 }
-.file-item:hover, .file-item.active { background: #1e2a3a; }
+.file-item:hover, .file-item.active { background: var(--hover-bg); }
 .file-item .file-name { flex: 1; cursor: pointer; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.file-item small { color: var(--fg-muted, #8aa); }
-.btn-danger { color: #f88; }
+.file-item small { color: var(--fg-muted, #6b7280); }
+.btn-danger { color: #dc2626; }
 .viewer { display: flex; flex-direction: column; min-height: 200px; flex: 1; }
 .code-viewer { flex: 1; min-height: 260px; display: flex; }
 
@@ -469,4 +523,24 @@ textarea.editor {
 @keyframes budgetPulse {
   0% { background-position: 0% 50%; }
   100% { background-position: 200% 50%; }
+}
+
+/* 运行中的测试按钮：彩色渐变 + 呼吸光晕（与工具运行徽标同款动画） */
+.btn.btn-running,
+.menubar button.btn-running {
+  background: linear-gradient(270deg, #f472b6, #a78bfa, #60a5fa, #34d399, #fbbf24, #f472b6);
+  background-size: 500% 100%;
+  animation: toolGradient 4s linear infinite, toolPulse 2s ease-in-out infinite;
+  color: #0b1220;
+  font-weight: 600;
+  opacity: 1;
+  cursor: progress;
+}
+
+/* SweetAlert 弹窗：保留文本中的换行，长内容可滚动 */
+.swal2-html-container {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  max-height: 60vh;
+  overflow-y: auto;
 }

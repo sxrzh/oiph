@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { CodeEditor } from './components/CodeEditor';
 import { swAlert } from './components/sw';
+import { getTheme, saveTheme, type Theme } from './theme';
 
 // ---------------------------------------------------------------------------
 // 类型
@@ -140,6 +141,29 @@ function BudgetCard() {
   );
 }
 
+function AppearanceCard() {
+  const [theme, setTheme] = useState<Theme>(getTheme());
+  const change = (t: Theme) => {
+    setTheme(t);
+    saveTheme(t);
+  };
+  return (
+    <div className="settings-card">
+      <h3>外观</h3>
+      <div className="row">
+        <div>
+          <label>主题</label>
+          <select value={theme} onChange={e => change(e.target.value as Theme)}>
+            <option value="light">浅色（默认）</option>
+            <option value="dark">深色</option>
+          </select>
+        </div>
+      </div>
+      <p className="hint" style={{ margin: 0 }}>立即生效并记住选择，主界面与设置页共用。</p>
+    </div>
+  );
+}
+
 function ApiConfigPane() {
   const [agents, setAgents] = useState<AgentConf[]>([]);
   const [saving, setSaving] = useState<string | null>(null);
@@ -184,6 +208,7 @@ function ApiConfigPane() {
   return (
     <div className="settings-pane">
       <h2>API 配置</h2>
+      <AppearanceCard />
       <BudgetCard />
       <p className="hint">Base URL / API Key / 模型按 agent 配置；留空时直接回退环境变量 OPENAI_BASE_URL / OPENAI_API_KEY / OPENAI_MODEL。保存后立即生效，无需重启。</p>
       {agents.map(ag => (

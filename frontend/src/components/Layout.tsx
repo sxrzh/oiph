@@ -26,7 +26,7 @@ export function MenuBar({ onTestDone, budget }: { onTestDone: () => void; budget
           setExporting(false);
         }
       }}>{exporting ? '导出中…' : '导出 Lemon'}</button>
-      <button disabled={testing} onClick={async () => {
+      <button className={testing ? 'btn-running' : ''} disabled={testing} onClick={async () => {
         setTesting(true);
         try {
           const r = await runTest();

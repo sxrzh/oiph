@@ -7,7 +7,8 @@ import { Spoiler } from './Spoiler';
 interface DisplayMessage {
   role: string;
   content: string;
-  toolCalls?: string;
+  /** 工具调用气泡：工具返回结果（与 content 一起渲染为两个 spoiler） */
+  result?: string;
   agent?: string;
   toolId?: number;
   running?: boolean;
@@ -67,7 +68,8 @@ export function ChatArea({
     <>
       <div className="chat-area" ref={chatRef}>
         {messages.map((msg, i) => {
-          const isSubAgentResult = msg.role === 'tool' && msg.content.includes('[sub-session]');
+          const isSubAgentResult = msg.role === 'tool'
+            && (msg.content.includes('[sub-session]') || !!msg.result?.includes('[sub-session]'));
           let child: ChildSession | null = null;
           if (isSubAgentResult && childIndex < childSessions.length) {
             child = childSessions[childIndex++];
@@ -134,17 +136,39 @@ function RunningToolBadge({ name, startedAt }: { name: string; startedAt: number
   );
 }
 
-/// 工具调用/结果正文：超过 300 字符用 spoiler 折叠（默认折叠，点击展开）。
-function ToolBody({ text }: { text: string }) {
+/// 工具调用/结果正文（单个区块）：超过 300 字符用 spoiler 折叠。
+/// 工具调用区块折叠标题只显示工具名；结果区块显示字符数。
+function ToolBody({ text, toolName }: { text: string; toolName?: string }) {
   if (text.length <= 300) {
     return <div className="text" style={{ whiteSpace: 'pre-wrap' }}>{text}</div>;
   }
-  const head = text.replace(/\s+/g, ' ').trim();
-  const preview = head.length > 60 ? `${head.slice(0, 60)}…` : head;
+  const title = toolName
+    ? `⚙ ${toolName}`
+    : `工具结果（共 ${text.length} 字符，点击展开）`;
   return (
-    <Spoiler title={`${preview}（共 ${text.length} 字符，点击展开）`} defaultOpen={false}>
+    <Spoiler title={title} defaultOpen={false}>
       <div className="text" style={{ whiteSpace: 'pre-wrap', maxHeight: '420px', overflow: 'auto' }}>{text}</div>
     </Spoiler>
+  );
+}
+
+/// 工具气泡：调用与结果合并为同一个气泡，各自一个 spoiler（两个折叠区）。
+/// 尚未返回结果时（运行中）退化为单个调用区块。
+function ToolBubble({ msg }: { msg: DisplayMessage }) {
+  const callText = msg.content.replace('[sub-session]', '').trim();
+  if (msg.result == null) {
+    return <ToolBody text={callText} toolName={msg.toolName} />;
+  }
+  const resultText = msg.result.replace('[sub-session]', '').trim();
+  return (
+    <div className="tool-sections">
+      <Spoiler title={`⚙ ${msg.toolName ?? '工具调用'}`} defaultOpen={false}>
+        <div className="text" style={{ whiteSpace: 'pre-wrap', maxHeight: '300px', overflow: 'auto' }}>{callText}</div>
+      </Spoiler>
+      <Spoiler title={`工具结果（共 ${resultText.length} 字符，点击展开）`} defaultOpen={false}>
+        <div className="text" style={{ whiteSpace: 'pre-wrap', maxHeight: '420px', overflow: 'auto' }}>{resultText}</div>
+      </Spoiler>
+    </div>
   );
 }
 
@@ -160,6 +184,7 @@ function ChatMessageView({
   const roleTag = msg.role === 'user' ? '你' :
     msg.role === 'assistant' ? 'Supervisor' :
     msg.role === 'tool' ? '工具' :
+    msg.role === 'error' ? '错误' :
     msg.role === 'system' ? '系统' : msg.role;
   const displayContent = msg.content.replace('[sub-session]', '').trim();
 
@@ -171,7 +196,7 @@ function ChatMessageView({
       </ReactMarkdown>
     </div>
   ) : msg.role === 'tool' ? (
-    <ToolBody text={displayContent} />
+    <ToolBubble msg={msg} />
   ) : (
     <div className="text" style={{ whiteSpace: 'pre-wrap' }}>{displayContent}</div>
   );
@@ -180,7 +205,6 @@ function ChatMessageView({
     <div className={`msg ${msg.role}${msg.running ? ' msg-running' : ''}`}>
       <div className="role-tag">{roleTag}</div>
       {body}
-      {msg.toolCalls && <div className="tool-call" style={{ marginTop: '4px' }}>{msg.toolCalls}</div>}
       {msg.running && msg.toolName && msg.startedAt != null && (
         <div style={{ marginTop: '6px' }}>
           <RunningToolBadge name={msg.toolName} startedAt={msg.startedAt} />

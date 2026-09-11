@@ -45,7 +45,7 @@ export function ProblemArea({
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
           <h3 style={{ flex: 1 }}>{problem.name || problem.id}</h3>
           <button className="btn" onClick={() => { onRefresh(); }}>刷新</button>
-          <button className="btn" disabled={testing} onClick={runSelfTest}>{testing ? '测试中…' : '单题自测'}</button>
+          <button className={`btn${testing ? ' btn-running' : ''}`} disabled={testing} onClick={runSelfTest}>{testing ? '测试中…' : '单题自测'}</button>
         </div>
       </div>
       <div className="detail-tabs">

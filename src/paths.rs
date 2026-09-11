@@ -112,26 +112,40 @@ pub(crate) mod tests {
         HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    /// 沙盒 HOME：切到临时目录并写入 vendor 的两个 testlib。
-    /// Guard 被 drop 时恢复原 HOME 并删除临时目录。
-    pub(crate) fn sandbox_home_with_vendor(tag: &str) -> HomeGuard {
+    /// 沙盒 HOME：切到临时目录。Guard 被 drop 时恢复原 HOME 并删除临时目录。
+    /// 测试结束必须恢复，否则会污染后续测试（串行执行时尤其明显）。
+    pub(crate) fn sandbox_home(tag: &str) -> HomeGuard {
         let lock = HOME_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var_os("HOME");
         let home = std::env::temp_dir()
             .join(format!("oiph_home_{tag}_{}", uuid::Uuid::new_v4()));
-        let vendor = home.join(".oiph").join("vendor");
-        std::fs::create_dir_all(&vendor).unwrap();
-        std::fs::write(vendor.join("testlib.h"), "// vendor testlib (sandbox)\n").unwrap();
-        std::fs::write(vendor.join("testlib_lemon.h"), "// vendor lemon testlib (sandbox)\n").unwrap();
+        std::fs::create_dir_all(&home).unwrap();
         #[allow(unused_unsafe)]
         unsafe { std::env::set_var("HOME", &home); }
         HomeGuard { prev, home, _lock: lock }
+    }
+
+    /// 沙盒 HOME：切到临时目录并写入 vendor 的两个 testlib。
+    pub(crate) fn sandbox_home_with_vendor(tag: &str) -> HomeGuard {
+        let guard = sandbox_home(tag);
+        let vendor = guard.home.join(".oiph").join("vendor");
+        std::fs::create_dir_all(&vendor).unwrap();
+        std::fs::write(vendor.join("testlib.h"), "// vendor testlib (sandbox)\n").unwrap();
+        std::fs::write(vendor.join("testlib_lemon.h"), "// vendor lemon testlib (sandbox)\n").unwrap();
+        guard
     }
 
     pub(crate) struct HomeGuard {
         prev: Option<std::ffi::OsString>,
         home: PathBuf,
         _lock: MutexGuard<'static, ()>,
+    }
+
+    impl HomeGuard {
+        /// 沙盒家目录路径。
+        pub(crate) fn home(&self) -> &Path {
+            &self.home
+        }
     }
 
     impl Drop for HomeGuard {

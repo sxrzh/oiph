@@ -14,7 +14,8 @@ import type { AskQuestion, AskAnswer } from './components/Questionnaire';
 interface DisplayMessage {
   role: string;
   content: string;
-  toolCalls?: string;
+  /** 工具调用气泡：工具返回结果（与 content 一起渲染为两个 spoiler） */
+  result?: string;
   agent?: string;
   /** 运行中的工具调用：配对 id + 开始时间（用于"已运行 x 秒"提示） */
   toolId?: number;
@@ -51,7 +52,11 @@ export default function App() {
   const [budget, setBudget] = useState<BudgetInfo | null>(null);
   const budgetWarnedRef = useRef(false);
   const wsRef = useRef<WebSocket | null>(null);
-  const currentMsgRef = useRef<DisplayMessage | null>(null);
+  // 思维链与回答分别累积：部分模型（DeepSeek 等）会在流中交替输出
+  // reasoning_content 与 content，若共用单个 ref 会被切成大量碎片气泡。
+  // 两者均在 step_boundary / 工具调用 / 回合结束时重置。
+  const currentAssistantRef = useRef<DisplayMessage | null>(null);
+  const currentReasoningRef = useRef<DisplayMessage | null>(null);
   const currentAgentRef = useRef<string>('supervisor');
   const sessionNameRef = useRef<string | null>(null);
   const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -87,17 +92,49 @@ export default function App() {
     if (!d.error) setProblem(d);
   }, [currentProblemId]);
 
-  const messagesToDisplay = (raw: { role: string; content: string | null; tool_calls?: any[] }[]): DisplayMessage[] =>
-    raw
-      .filter((m: any) => m.role !== 'system')
-      .map((m: any) => ({
-        role: m.role,
-        content:
-          m.role === 'compaction'
-            ? `🔄 上下文已压缩\n\n${m.content || ''}`
-            : m.content || '',
-        toolCalls: m.tool_calls?.map((tc: any) => `[${tc.function.name}(${tc.function.arguments})]`).join('\n'),
-      }));
+  // 工具调用文本（与实时流 tool_call 气泡格式一致）
+  const formatToolCall = (tc: any): string => {
+    const name = tc?.function?.name ?? 'unknown';
+    let args = tc?.function?.arguments ?? '';
+    try {
+      args = JSON.stringify(JSON.parse(args), null, 2);
+    } catch {
+      // arguments 不是合法 JSON 时保持原样
+    }
+    return `工具调用：${name}(${args})`;
+  };
+
+  // 会话历史转显示消息：assistant 的 tool_calls 拆成独立工具气泡，
+  // agent 气泡只保留正文；紧随其后的 tool 结果按顺序合并进对应调用气泡
+  //（一个气泡内两个 spoiler：调用 + 结果）
+  const messagesToDisplay = (raw: { role: string; content: string | null; tool_calls?: any[] }[]): DisplayMessage[] => {
+    const out: DisplayMessage[] = [];
+    const pending: DisplayMessage[] = [];
+    for (const m of raw) {
+      if (m.role === 'system') continue;
+      if (m.role === 'compaction') {
+        out.push({ role: 'compaction', content: `🔄 上下文已压缩\n\n${m.content || ''}` });
+        continue;
+      }
+      if (m.role === 'assistant' && m.tool_calls?.length) {
+        if (m.content) out.push({ role: 'assistant', content: m.content });
+        for (const tc of m.tool_calls) {
+          const bubble: DisplayMessage = { role: 'tool', content: formatToolCall(tc), toolName: tc?.function?.name };
+          out.push(bubble);
+          pending.push(bubble);
+        }
+        continue;
+      }
+      if (m.role === 'tool') {
+        const target = pending.shift();
+        if (target) target.result = m.content || '';
+        else out.push({ role: 'tool', content: m.content || '' });
+        continue;
+      }
+      out.push({ role: m.role, content: m.content || '' });
+    }
+    return out;
+  };
 
   const handleMessagesLoaded = (raw: any[], rawChildren: any[], rawUsage?: any) => {
     setMessages(messagesToDisplay(raw));
@@ -162,22 +199,23 @@ export default function App() {
 
   const handleWsMessage = (msg: WsMessage) => {
     if (msg.type === 'content') {
-      if (!currentMsgRef.current || currentMsgRef.current.role !== 'assistant') {
-        currentMsgRef.current = { role: 'assistant', content: '', agent: currentAgentRef.current };
-        setMessages(m => [...m, currentMsgRef.current!]);
+      if (!currentAssistantRef.current) {
+        currentAssistantRef.current = { role: 'assistant', content: '', agent: currentAgentRef.current };
+        setMessages(m => [...m, currentAssistantRef.current!]);
       }
-      currentMsgRef.current.content += msg.text;
+      currentAssistantRef.current.content += msg.text;
       scheduleFlush();
     } else if (msg.type === 'reasoning') {
-      if (!currentMsgRef.current || currentMsgRef.current.role !== 'reasoning') {
-        currentMsgRef.current = { role: 'reasoning', content: '', agent: currentAgentRef.current };
-        setMessages(m => [...m, currentMsgRef.current!]);
+      if (!currentReasoningRef.current) {
+        currentReasoningRef.current = { role: 'reasoning', content: '', agent: currentAgentRef.current };
+        setMessages(m => [...m, currentReasoningRef.current!]);
       }
-      currentMsgRef.current.content += msg.text;
+      currentReasoningRef.current.content += msg.text;
       scheduleFlush();
     } else if (msg.type === 'tool_call') {
       const { id, name, args } = msg as any;
-      currentMsgRef.current = null;
+      currentAssistantRef.current = null;
+      currentReasoningRef.current = null;
       setMessages(m => [...m, {
         role: 'tool',
         content: `工具调用：${name}(${JSON.stringify(args, null, 2)})`,
@@ -188,17 +226,25 @@ export default function App() {
       }]);
     } else if (msg.type === 'tool_result') {
       const { id, text } = msg as any;
-      currentMsgRef.current = null;
+      currentAssistantRef.current = null;
+      currentReasoningRef.current = null;
       setMessages(m => {
-        // 有配对 id：结束对应工具的运行提示（不追加消息，稍后与结果合并显示）
-        const next = id != null
-          ? m.map(d => (d.toolId === id ? { ...d, running: false } : d))
-          : m;
-        return [...next, { role: 'tool', content: text }];
+        if (id != null) {
+          // 有配对 id：结果合并进对应调用气泡（一个气泡内两个 spoiler）
+          const idx = m.findIndex(d => d.toolId === id);
+          if (idx >= 0) {
+            const next = [...m];
+            next[idx] = { ...next[idx], running: false, result: text };
+            return next;
+          }
+        }
+        // 无配对（如快照提示）：独立结果气泡
+        return [...m, { role: 'tool', content: text }];
       });
     } else if (msg.type === 'step_boundary') {
       currentAgentRef.current = (msg as any).agent || 'supervisor';
-      currentMsgRef.current = null;
+      currentAssistantRef.current = null;
+      currentReasoningRef.current = null;
       flushNow();
     } else if (msg.type === 'ask_user') {
       setAskQuestions((msg as any).questions);
@@ -236,11 +282,13 @@ export default function App() {
       // 其他日志不进对话区
     } else if (msg.type === 'done' || msg.type === 'error') {
       setStreaming(false);
-      currentMsgRef.current = null;
+      currentAssistantRef.current = null;
+      currentReasoningRef.current = null;
       setAskQuestions(null);
       flushNow();
       if (msg.type === 'error') {
-        setMessages(m => [...m, { role: 'system', content: '错误：' + msg.message }]);
+        // API 调用失败：橙色错误气泡（role=error）
+        setMessages(m => [...m, { role: 'error', content: msg.message }]);
       } else if ((msg as any).interrupted) {
         setMessages(m => [...m, { role: 'system', content: '已中止' }]);
       }
@@ -252,6 +300,8 @@ export default function App() {
       refreshSessionList();
     } else if (msg.type === 'messages') {
       const displayMsgs = messagesToDisplay((msg as any).messages);
+      currentAssistantRef.current = null;
+      currentReasoningRef.current = null;
       setMessages(displayMsgs);
       if ((msg as any).children) setChildren((msg as any).children);
       if ((msg as any).session_name) {
@@ -277,6 +327,8 @@ export default function App() {
   const handleSend = (text: string) => {
     setMessages(m => [...m, { role: 'user', content: text }]);
     setStreaming(true);
+    currentAssistantRef.current = null;
+    currentReasoningRef.current = null;
     // 用量不在这里清零：本回合/上一回合的精确用量会在全局基线（usage 消息）
     // 到达时并入基线并清空，保证统计只增不减
     setUsageLive({ input: 0, output: 0 });

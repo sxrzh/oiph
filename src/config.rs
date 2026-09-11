@@ -272,10 +272,8 @@ mod tests {
 
     #[test]
     fn expand_tilde_works() {
-        let _guard = crate::paths::tests::lock_home();
-        #[allow(unused_unsafe)]
-        unsafe { std::env::set_var("HOME", "/home/test"); }
-        assert_eq!(expand_tilde("~/x.md"), PathBuf::from("/home/test/x.md"));
+        let guard = crate::paths::tests::sandbox_home("tilde");
+        assert_eq!(expand_tilde("~/x.md"), guard.home().join("x.md"));
         assert_eq!(expand_tilde("/abs/x.md"), PathBuf::from("/abs/x.md"));
     }
 

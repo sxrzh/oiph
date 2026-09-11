@@ -610,6 +610,7 @@ async fn handle_ws(mut socket: WebSocket, st: Arc<ServerState>) {
             }
             crate::term::set_ws_sender(None);
 
+            let mut turn_error: Option<String> = None;
             match result {
                 Ok(turn_result) => {
                     // 累计到 pending，待保存时持久化
@@ -653,9 +654,8 @@ async fn handle_ws(mut socket: WebSocket, st: Arc<ServerState>) {
                     }
                 }
                 Err(e) => {
-                    let _ = tx_agent.send(
-                        json!({ "type": "error", "message": format!("{e:#}") }).to_string(),
-                    );
+                    // 延后到 messages 快照之后发送，避免错误气泡被快照覆盖
+                    turn_error = Some(format!("{e:#}"));
                 }
             }
             save_session(&st_agent).await;
@@ -689,6 +689,12 @@ async fn handle_ws(mut socket: WebSocket, st: Arc<ServerState>) {
             let _ = tx_agent.send(
                 json!({ "type": "messages", "messages": messages_json, "children": children, "session_name": session_name }).to_string(),
             );
+            // 最后发送本回合错误（橙色错误气泡，避免被快照覆盖）
+            if let Some(msg) = turn_error {
+                let _ = tx_agent.send(
+                    json!({ "type": "error", "message": msg }).to_string(),
+                );
+            }
         }
     });
 

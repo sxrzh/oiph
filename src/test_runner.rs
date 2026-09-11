@@ -1,6 +1,7 @@
 //! 集成测试：编译辅助程序、造数据、验证、运行 std 和 sols、检查正确性。
 //! 纯确定性过程，供 agent 调用或 CLI 命令直接执行。
 
+use std::collections::BTreeSet;
 use std::path::Path;
 use std::process::{Command, Stdio};
 use std::time::Instant;
@@ -111,6 +112,9 @@ fn run_one(contest_dir: &Path, pid: &str) -> anyhow::Result<TestReport> {
     let problem = project::load_problem(&pdir)?;
     let aux_dir = pdir.join("auxiliary");
 
+    // 文档与数据覆盖检查（题面/题解存在且非空；data 数据点被 subtasks 完全覆盖）
+    check_documents(&problem, &pdir, &mut report);
+
     // 临时目录
     let tmp = std::env::temp_dir().join(format!("oiph_test_{}_{}", pid, uuid::Uuid::new_v4()));
     std::fs::create_dir_all(&tmp)?;
@@ -189,6 +193,81 @@ fn run_one(contest_dir: &Path, pid: &str) -> anyhow::Result<TestReport> {
 
 fn cleanup(tmp: &Path) {
     let _ = std::fs::remove_dir_all(tmp);
+}
+
+/// 文档与数据覆盖检查：
+/// - 题面（`files.statement`，默认 `statement/zh_cn.md`）存在且非空
+/// - 题解（`files.tutorial`，默认 `tutorial/zh_cn.md`）存在且非空
+/// - `data/` 中的每个 `.in` 数据点都被某个 subtask 的 cases 覆盖
+///
+/// 不符合要求只给警告（不阻断后续测试流程）。
+fn check_documents(problem: &Problem, pdir: &Path, report: &mut TestReport) {
+    check_file_nonempty(pdir, &problem.files.statement, "题面", report);
+    let tutorial = problem
+        .files
+        .tutorial
+        .clone()
+        .unwrap_or_else(|| "tutorial/zh_cn.md".into());
+    check_file_nonempty(pdir, &tutorial, "题解", report);
+    check_data_coverage(problem, pdir, report);
+}
+
+/// 文件存在且去除空白后非空。
+fn check_file_nonempty(pdir: &Path, rel: &str, label: &str, report: &mut TestReport) {
+    let path = pdir.join(rel);
+    match std::fs::read_to_string(&path) {
+        Ok(s) if !s.trim().is_empty() => {
+            report.ok(format!("{label} {rel} 已就绪（{} 字符）", s.chars().count()));
+        }
+        Ok(_) => report.warn(format!("{label} {rel} 为空，请补充内容")),
+        Err(_) => report.warn(format!("{label} {rel} 不存在，请先创建")),
+    }
+}
+
+/// `data/` 下的 `.in` 数据点必须被 subtasks 的 cases 完全覆盖。
+fn check_data_coverage(problem: &Problem, pdir: &Path, report: &mut TestReport) {
+    let data_dir = pdir.join(&problem.files.data_dir);
+    let mut files: Vec<String> = Vec::new();
+    if let Ok(rd) = std::fs::read_dir(&data_dir) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if let Some(stem) = name.strip_suffix(".in") {
+                files.push(stem.to_string());
+            }
+        }
+    }
+    files.sort();
+    if files.is_empty() {
+        return; // 无数据文件时由后续流程给出"没有测试数据"警告
+    }
+
+    let covered: BTreeSet<&str> = problem
+        .subtasks
+        .iter()
+        .flat_map(|st| st.cases.iter().map(String::as_str))
+        .collect();
+    if covered.is_empty() {
+        report.warn(format!(
+            "题目未配置 subtasks，data/ 中 {} 个数据点（{}）未纳入评分",
+            files.len(),
+            files.join(", ")
+        ));
+        return;
+    }
+    let uncovered: Vec<&str> = files
+        .iter()
+        .map(String::as_str)
+        .filter(|f| !covered.contains(*f))
+        .collect();
+    if uncovered.is_empty() {
+        report.ok(format!("data/ 中 {} 个数据点均已被 subtasks 覆盖", files.len()));
+    } else {
+        report.warn(format!(
+            "data/ 中 {} 个数据点未被任何 subtask 覆盖：{}",
+            uncovered.len(),
+            uncovered.join(", ")
+        ));
+    }
 }
 
 /// 带超时的命令（用 `timeout <secs>` 包裹），防止生成器/验证器/检查器等
@@ -866,6 +945,7 @@ fn run_answer_only_sols(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::{Subtask, SubtaskType};
 
     #[test]
     fn report_to_string() {
@@ -885,5 +965,71 @@ mod tests {
         assert!(r.is_clean());
         let s = r.to_string_report();
         assert!(s.contains("无警告无错误"));
+    }
+
+    #[test]
+    fn document_checks_missing_and_empty() {
+        let dir = std::env::temp_dir().join(format!("oiph_doc_{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let problem = Problem::new("p");
+
+        // 题面/题解均不存在：两个警告
+        let mut r = TestReport::new("p");
+        check_documents(&problem, &dir, &mut r);
+        assert!(r.warnings.iter().any(|w| w.contains("题面") && w.contains("不存在")), "{:?}", r.warnings);
+        assert!(r.warnings.iter().any(|w| w.contains("题解") && w.contains("不存在")), "{:?}", r.warnings);
+
+        // 题面非空（无警告）、题解只有空白（警告为空）
+        std::fs::create_dir_all(dir.join("statement")).unwrap();
+        std::fs::create_dir_all(dir.join("tutorial")).unwrap();
+        std::fs::write(dir.join("statement/zh_cn.md"), "题面内容").unwrap();
+        std::fs::write(dir.join("tutorial/zh_cn.md"), "  \n\t").unwrap();
+        let mut r2 = TestReport::new("p");
+        check_documents(&problem, &dir, &mut r2);
+        assert!(!r2.warnings.iter().any(|w| w.contains("题面")), "{:?}", r2.warnings);
+        assert!(r2.warnings.iter().any(|w| w.contains("题解") && w.contains("为空")), "{:?}", r2.warnings);
+
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn data_coverage_reports_uncovered() {
+        let dir = std::env::temp_dir().join(format!("oiph_cov_{}", uuid::Uuid::new_v4()));
+        let data = dir.join("data");
+        std::fs::create_dir_all(&data).unwrap();
+        std::fs::write(data.join("a.in"), "1").unwrap();
+        std::fs::write(data.join("b.in"), "1").unwrap();
+        std::fs::write(data.join("note.txt"), "x").unwrap(); // 非 .in 不参与
+
+        let mut problem = Problem::new("p");
+        problem.subtasks = vec![Subtask {
+            score: 100.0,
+            stype: SubtaskType::Sum,
+            cases: vec!["a".into()],
+            pretest: false,
+            sample: false,
+            depend: vec![],
+        }];
+        let mut r = TestReport::new("p");
+        check_data_coverage(&problem, &dir, &mut r);
+        assert_eq!(r.warnings.len(), 1, "{:?}", r.warnings);
+        assert!(r.warnings[0].contains("未被任何 subtask 覆盖"));
+        assert!(r.warnings[0].contains('b'));
+        assert!(!r.warnings[0].contains("note"));
+
+        // 全覆盖后无警告
+        problem.subtasks[0].cases.push("b".into());
+        let mut r2 = TestReport::new("p");
+        check_data_coverage(&problem, &dir, &mut r2);
+        assert!(r2.warnings.is_empty(), "{:?}", r2.warnings);
+
+        // 未配置 subtasks：提示数据点未纳入评分
+        problem.subtasks.clear();
+        let mut r3 = TestReport::new("p");
+        check_data_coverage(&problem, &dir, &mut r3);
+        assert_eq!(r3.warnings.len(), 1, "{:?}", r3.warnings);
+        assert!(r3.warnings[0].contains("未配置 subtasks"));
+
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

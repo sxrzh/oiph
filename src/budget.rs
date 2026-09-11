@@ -81,10 +81,7 @@ mod tests {
 
     #[test]
     fn roundtrip_and_over_warn() {
-        let _guard = crate::paths::tests::lock_home();
-        let home = std::env::temp_dir().join(format!("oiph_budget_{}", uuid::Uuid::new_v4()));
-        #[allow(unused_unsafe)]
-        unsafe { std::env::set_var("HOME", &home); }
+        let _guard = crate::paths::tests::sandbox_home("budget");
         assert!(load().is_none(), "无 limit.json 时预算未启用");
 
         let b = BudgetFee { limit: 100.0, used: 95.0, warn: 10.0, currency: "CNY".into() };
@@ -97,7 +94,5 @@ mod tests {
         let b2 = reset_used().unwrap();
         assert_eq!(b2.used, 0.0);
         assert_eq!(b2.limit, 100.0);
-
-        std::fs::remove_dir_all(&home).ok();
     }
 }

@@ -1,5 +1,4 @@
 import CodeMirror from '@uiw/react-codemirror';
-import { oneDark } from '@codemirror/theme-one-dark';
 import { markdown, markdownLanguage } from '@codemirror/lang-markdown';
 import { cpp } from '@codemirror/lang-cpp';
 import { languages } from '@codemirror/language-data';
@@ -23,12 +22,11 @@ export function CodeEditor({
       ? [markdown({ base: markdownLanguage, codeLanguages: languages })]
       : [cpp()];
   return (
-    <div style={{ flex: 1, minHeight: 0, overflow: 'auto', border: '1px solid #333', borderRadius: 4 }}>
+    <div style={{ flex: 1, minHeight: 0, overflow: 'auto', border: '1px solid var(--border)', borderRadius: 4 }}>
       <CodeMirror
         value={value}
         height="100%"
         style={{ height: '100%' }}
-        theme={oneDark}
         editable={!readOnly}
         extensions={[
           ...extensions,

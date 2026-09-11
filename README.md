@@ -235,7 +235,7 @@ OIPH 为多 Agent 系统，与用户交互的是 supervisor，它以工具调用
 比赛以比赛工程的形式存储，Agent 可以调用专门定制的工具管理比赛工程中的题目编排、为一个题目注册多个不同解法、对题目和比赛进行集成测试等。
 本项目为 OI 组题定制了查重工具 `duplicate_check`，支持两个查重后端：[CPRet](https://cpret.online)（默认）与 [yuantiji](https://yuantiji.ac)。  
 
-【架构图】
+![](https://gitee.com/rzh123/oiph/raw/master/docs/reports/architecture.png)
 
 本 Agent 的工作流针对 OI 组题定制，主要分为 原创 和 搬运/改编 两种路线：
 - 原创：【流程图】

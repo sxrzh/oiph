@@ -7,6 +7,7 @@
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 
 use anyhow::{Context, Result};
 use serde_json::{json, Value};
@@ -51,7 +52,7 @@ pub fn export(contest_dir: &Path, output_dir: Option<&Path>) -> Result<(PathBuf,
             ));
             continue;
         }
-        let task = build_task(&problem, contest_dir, &data_dir, &std_dir, &mut spj_dirs)?;
+        let task = build_task(&problem, contest_dir, &data_dir, &std_dir, &mut spj_dirs, &mut warnings)?;
         tasks.push(task);
     }
 
@@ -77,21 +78,21 @@ fn sanitize(name: &str) -> String {
     name.replace(char::is_whitespace, "_")
 }
 
-/// 构建单个题目的 LemonLime task JSON，同时拷贝数据文件。
+/// 构建单个题目的 LemonLime task JSON，同时准备数据文件。
 fn build_task(
     problem: &Problem,
     contest_dir: &Path,
     data_dir: &Path,
     std_dir: &Path,
     spj_dirs: &mut Vec<String>,
+    warnings: &mut Vec<String>,
 ) -> Result<Value> {
     let pid = &problem.id;
     let pdata_dir = data_dir.join(pid);
     std::fs::create_dir_all(&pdata_dir)?;
 
-    // 拷贝测试数据
-    let src_data_dir = project::problem_dir(contest_dir, pid).join("data");
-    copy_data_files(&src_data_dir, &pdata_dir)?;
+    // 准备测试数据：data_gen 配置的现场生成，其余从 data/ 复制
+    prepare_data(problem, contest_dir, &pdata_dir, warnings)?;
 
     // 拷贝 down/ 里的下发文件
     let down_dir = project::problem_dir(contest_dir, pid).join("statement").join("down");
@@ -275,23 +276,239 @@ fn auto_discover_cases(problem: &Problem, pid: &str) -> Result<Vec<Value>> {
     Ok(vec![])
 }
 
-/// 拷贝 data/ 下的所有 .in 和 .ans 文件。
-fn copy_data_files(src: &Path, dst: &Path) -> Result<()> {
-    if !src.exists() {
-        return Ok(());
-    }
-    for e in std::fs::read_dir(src)? {
-        let e = e?;
-        let p = e.path();
-        if !p.is_file() {
-            continue;
+/// 带超时的命令（用 `timeout <secs>` 包裹，防止 generator/std 意外挂起）。
+fn timed_cmd(program: &Path, secs: u64) -> Command {
+    let mut c = Command::new("timeout");
+    c.arg(secs.to_string()).arg(program);
+    c
+}
+
+/// 按题目配置准备测试数据到导出目录：
+/// - `data_gen` 中配置的测试点：现场编译并调用 generator 生成 `.in`
+/// - 其余测试点：从 `data/` 复制 `.in`（缺失则告警）
+/// - `.ans`：优先从 `data/` 复制；缺失时传统题用 std 现场生成
+fn prepare_data(
+    problem: &Problem,
+    contest_dir: &Path,
+    pdata_dir: &Path,
+    warnings: &mut Vec<String>,
+) -> Result<()> {
+    let pid = &problem.id;
+    let pdir = project::problem_dir(contest_dir, pid);
+    let src_data_dir = pdir.join("data");
+    let aux_dir = pdir.join("auxiliary");
+
+    // 测试点列表：subtasks 的 cases（去重保序）；无配置则发现 data/*.in
+    let mut cases: Vec<String> = Vec::new();
+    for st in &problem.subtasks {
+        for c in &st.cases {
+            if !cases.contains(c) {
+                cases.push(c.clone());
+            }
         }
-        let name = e.file_name();
-        let name = name.to_string_lossy();
-        if name.ends_with(".in") || name.ends_with(".ans") || name.ends_with(".out") {
-            std::fs::copy(&p, dst.join(e.file_name()))?;
+    }
+    if cases.is_empty()
+        && let Ok(rd) = std::fs::read_dir(&src_data_dir)
+    {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if let Some(stem) = name.strip_suffix(".in") {
+                cases.push(stem.to_string());
+            }
+        }
+        cases.sort();
+    }
+
+    let tmp = std::env::temp_dir().join(format!("oiph_export_{pid}_{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&tmp)?;
+
+    // 需要生成数据：编译 generator
+    let need_gen = cases.iter().any(|c| problem.data_gen.contains_key(c));
+    let mut gen_bin: Option<PathBuf> = None;
+    if need_gen {
+        let testlib_h = aux_dir.join("testlib.h");
+        if !testlib_h.exists()
+            && let Ok(content) = crate::paths::vendor_read("testlib.h")
+        {
+            let _ = std::fs::write(&testlib_h, content.as_bytes());
+        }
+        let src = aux_dir.join("generator.cpp");
+        if !src.exists() {
+            warnings.push(format!("题目 {pid}：配置了生成数据但缺少 auxiliary/generator.cpp"));
+        } else {
+            let flags = problem.compile_flags.split_whitespace().collect::<Vec<_>>();
+            let out = tmp.join("generator");
+            match timed_cmd(Path::new("g++"), 600)
+                .args(&flags)
+                .arg("-I")
+                .arg(&aux_dir)
+                .arg("-o")
+                .arg(&out)
+                .arg(&src)
+                .stderr(Stdio::piped())
+                .output()
+            {
+                Ok(o) if o.status.success() => gen_bin = Some(out),
+                Ok(o) => warnings.push(format!(
+                    "题目 {pid}：generator 编译失败，生成的测试点将回退为复制 data/：\n{}",
+                    String::from_utf8_lossy(&o.stderr)
+                )),
+                Err(e) => warnings.push(format!("题目 {pid}：generator 编译失败：{e}")),
+            }
         }
     }
+
+    // 答案缺失的传统题：编译 std 现场生成 .ans
+    let mut std_bin: Option<PathBuf> = None;
+    if problem.problem_type == ProblemType::Traditional {
+        let missing_ans = cases
+            .iter()
+            .any(|c| !src_data_dir.join(format!("{c}.ans")).is_file());
+        if missing_ans {
+            let std_src = problem.std.file.as_deref().unwrap_or("solutions/std.cpp");
+            let std_path = pdir.join(std_src);
+            if !std_path.exists() {
+                warnings.push(format!("题目 {pid}：缺少 std（{std_src}），缺失的答案无法现场生成"));
+            } else {
+                let flags = problem.compile_flags.split_whitespace().collect::<Vec<_>>();
+                let out = tmp.join("std");
+                match timed_cmd(Path::new("g++"), 600)
+                    .args(&flags)
+                    .arg("-o")
+                    .arg(&out)
+                    .arg(&std_path)
+                    .stderr(Stdio::piped())
+                    .output()
+                {
+                    Ok(o) if o.status.success() => std_bin = Some(out),
+                    Ok(o) => warnings.push(format!(
+                        "题目 {pid}：std 编译失败，缺失的答案无法现场生成：\n{}",
+                        String::from_utf8_lossy(&o.stderr)
+                    )),
+                    Err(e) => warnings.push(format!("题目 {pid}：std 编译失败：{e}")),
+                }
+            }
+        }
+    }
+
+    // 逐个测试点：生成或复制 .in；复制或生成 .ans
+    for case in &cases {
+        let in_src = src_data_dir.join(format!("{case}.in"));
+        let in_dst = pdata_dir.join(format!("{case}.in"));
+        let ans_src = src_data_dir.join(format!("{case}.ans"));
+        let ans_dst = pdata_dir.join(format!("{case}.ans"));
+
+        if problem.data_gen.contains_key(case) {
+            // 生成的测试点：现场调用 generator（失败回退复制 data/）
+            let mut generated = false;
+            if let Some(gen_path) = &gen_bin {
+                let args = problem
+                    .data_gen
+                    .get(case)
+                    .map(String::as_str)
+                    .unwrap_or("");
+                let output = timed_cmd(gen_path, 60)
+                    .args(args.split_whitespace())
+                    .stdout(
+                        std::fs::File::create(&in_dst)
+                            .map(Stdio::from)
+                            .unwrap_or(Stdio::null()),
+                    )
+                    .stderr(Stdio::piped())
+                    .output();
+                match output {
+                    Ok(o) if o.status.success() => generated = true,
+                    Ok(o) => warnings.push(format!(
+                        "题目 {pid}：generator 生成 {case} 失败：{}",
+                        String::from_utf8_lossy(&o.stderr)
+                    )),
+                    Err(e) => warnings.push(format!("题目 {pid}：generator 运行失败（{case}）：{e}")),
+                }
+            }
+            if !generated {
+                if in_src.is_file() {
+                    std::fs::copy(&in_src, &in_dst)?;
+                    warnings.push(format!(
+                        "题目 {pid}：测试点 {case} 生成失败，已回退为复制 data/{case}.in"
+                    ));
+                } else {
+                    warnings.push(format!(
+                        "题目 {pid}：测试点 {case} 生成失败且 data/ 中无 {case}.in"
+                    ));
+                }
+            }
+        } else if in_src.is_file() {
+            std::fs::copy(&in_src, &in_dst)
+                .with_context(|| format!("复制 {} 失败", in_src.display()))?;
+        } else {
+            warnings.push(format!(
+                "题目 {pid}：测试点 {case} 缺少 data/{case}.in（且未配置生成参数）"
+            ));
+        }
+
+        if ans_src.is_file() {
+            std::fs::copy(&ans_src, &ans_dst)
+                .with_context(|| format!("复制 {} 失败", ans_src.display()))?;
+        } else if let Some(std) = &std_bin {
+            if in_dst.is_file() {
+                let timeout_secs = (problem.time_limit_ms / 1000).max(5) * 3;
+                let output = timed_cmd(std, timeout_secs)
+                    .stdin(
+                        std::fs::File::open(&in_dst)
+                            .map(Stdio::from)
+                            .unwrap_or(Stdio::null()),
+                    )
+                    .stdout(
+                        std::fs::File::create(&ans_dst)
+                            .map(Stdio::from)
+                            .unwrap_or(Stdio::null()),
+                    )
+                    .stderr(Stdio::piped())
+                    .output();
+                match output {
+                    Ok(o) if o.status.success() => {}
+                    Ok(o) => warnings.push(format!(
+                        "题目 {pid}：std 生成 {case}.ans 失败（退出码 {:?}）",
+                        o.status.code()
+                    )),
+                    Err(e) => warnings.push(format!("题目 {pid}：std 运行失败（{case}）：{e}")),
+                }
+            }
+        } else if problem.problem_type != ProblemType::Traditional {
+            warnings.push(format!(
+                "题目 {pid}：测试点 {case} 缺少 data/{case}.ans（该题型无法现场生成答案）"
+            ));
+        } else {
+            warnings.push(format!(
+                "题目 {pid}：测试点 {case} 缺少答案（data/{case}.ans 不存在且 std 不可用）"
+            ));
+        }
+
+        // 兼容 data/ 中已有的 <case>.out（原样保留）
+        let out_src = src_data_dir.join(format!("{case}.out"));
+        if out_src.is_file() {
+            std::fs::copy(&out_src, pdata_dir.join(format!("{case}.out")))
+                .with_context(|| format!("复制 {} 失败", out_src.display()))?;
+        }
+    }
+
+    // 复制 data/ 中未被 cases 覆盖的其余 .in/.ans/.out（保留额外文件）
+    if let Ok(rd) = std::fs::read_dir(&src_data_dir) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let Some((stem, _)) = name.rsplit_once('.') else {
+                continue;
+            };
+            if cases.iter().any(|c| c == stem) {
+                continue;
+            }
+            if name.ends_with(".in") || name.ends_with(".ans") || name.ends_with(".out") {
+                let _ = std::fs::copy(e.path(), pdata_dir.join(&name));
+            }
+        }
+    }
+
+    let _ = std::fs::remove_dir_all(&tmp);
     Ok(())
 }
 
@@ -363,6 +580,82 @@ mod tests {
             Ok(())
         })
         .unwrap();
+    }
+
+    fn has_gpp() -> bool {
+        Command::new("g++")
+            .arg("--version")
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+    }
+
+    #[test]
+    fn export_generates_configured_cases() {
+        if !has_gpp() {
+            eprintln!("跳过：未找到 g++");
+            return;
+        }
+        let _home = crate::paths::tests::sandbox_home_with_vendor("lemon_gen");
+        let dir = std::env::temp_dir().join(format!("prep_lemon_gen_{}", uuid::Uuid::new_v4()));
+        make_contest(&dir);
+        make_problem(&dir, "g");
+        let pdir = project::problem_dir(&dir, "g");
+
+        // generator：输出固定内容
+        std::fs::create_dir_all(pdir.join("auxiliary")).unwrap();
+        std::fs::write(
+            pdir.join("auxiliary/generator.cpp"),
+            "#include <cstdio>\nint main(){ printf(\"GENERATED\\n\"); }\n",
+        )
+        .unwrap();
+
+        // 点 2：从 data/ 复制；点 1：现场生成输入 + data/ 提供答案；
+        // 点 3：data/ 提供输入、缺失答案 → 用 std 现场生成
+        write_data(&dir, "g", "2", "copied");
+        std::fs::create_dir_all(pdir.join("data")).unwrap();
+        std::fs::write(pdir.join("data/1.ans"), "gen-ans").unwrap();
+        std::fs::write(pdir.join("data/3.in"), "3 4\n").unwrap();
+        std::fs::create_dir_all(pdir.join("solutions")).unwrap();
+        std::fs::write(
+            pdir.join("solutions/std.cpp"),
+            "#include <cstdio>\nint main(){ int a,b; if(scanf(\"%d %d\",&a,&b)!=2) return 1; printf(\"%d\\n\", a+b); }\n",
+        )
+        .unwrap();
+
+        set_subtasks(
+            &dir,
+            "g",
+            vec![Subtask {
+                score: 100.0,
+                stype: SubtaskType::Sum,
+                cases: vec!["1".into(), "2".into(), "3".into()],
+                pretest: false,
+                sample: false,
+                depend: vec![],
+            }],
+        );
+        project::with_problem_mut(&dir, "g", |p| {
+            p.data_gen.insert("1".into(), String::new());
+            Ok(())
+        })
+        .unwrap();
+
+        let (out, warnings) = export(&dir, None).unwrap();
+        assert!(warnings.is_empty(), "意外警告：{warnings:?}");
+        let d = out.join("data").join("g");
+        assert!(
+            std::fs::read_to_string(d.join("1.in")).unwrap().contains("GENERATED"),
+            "生成点 1 的输入应来自 generator"
+        );
+        assert_eq!(std::fs::read_to_string(d.join("2.in")).unwrap(), "copied");
+        assert_eq!(std::fs::read_to_string(d.join("1.ans")).unwrap(), "gen-ans");
+        assert_eq!(std::fs::read_to_string(d.join("3.ans")).unwrap(), "7\n");
+
+        std::fs::remove_dir_all(&dir).ok();
+        std::fs::remove_dir_all(&out).ok();
     }
 
     #[test]

@@ -36,6 +36,10 @@ struct ServerState {
     pending_usage: Arc<std::sync::Mutex<session_mod::TokenUsage>>,
     /// session 持久化的累计用量（状态栏基线）。
     saved_usage: Arc<std::sync::Mutex<session_mod::TokenUsage>>,
+    /// 已收到但尚未并入消息历史的用户消息（收到即写 sidecar，回合结束后并入）。
+    pending_user: Arc<std::sync::Mutex<Vec<ChatMessage>>>,
+    /// 串行化"收到即落盘"流程（避免多连接并发写 sidecar/历史）。
+    persist_lock: Arc<Mutex<()>>,
 }
 
 /// 当前总用量 = 持久化基线 + 本回合未保存部分。
@@ -88,32 +92,30 @@ fn usage_to_value(st: &ServerState, u: &session_mod::TokenUsage) -> Value {
 }
 
 pub async fn serve(app: Arc<App>, port: u16) -> anyhow::Result<()> {
-    let contest_dir = app.contest_dir();
+    // session 存储基准：有比赛用比赛目录，否则用运行目录（`.oiph` 建在其中）
+    let project_dir = app.project_dir();
 
     // 加载上次 session（含持久化的 Token 用量基线）
-    let (messages, current_session, saved_usage) = match &contest_dir {
-        Some(c) => {
-            let mut msgs = Vec::new();
-            let mut sess = None;
-            let mut usage = session_mod::TokenUsage::default();
-            if let Ok(Some(s)) = session_mod::last(c) {
-                let n = s.name.clone();
-                msgs = s.messages;
-                usage = s.usage;
-                if msgs.is_empty() || msgs[0].role != "system" {
-                    msgs.insert(0, agent::system_message_for(Role::Supervisor, &app));
-                }
-                sess = Some(n);
-            } else {
-                msgs.push(agent::system_message_for(Role::Supervisor, &app));
+    let (messages, current_session, saved_usage) = {
+        let mut msgs = Vec::new();
+        let mut sess = None;
+        let mut usage = session_mod::TokenUsage::default();
+        if let Ok(Some(s)) = session_mod::last(&project_dir) {
+            let n = s.name.clone();
+            msgs = s.messages;
+            usage = s.usage;
+            if msgs.is_empty() || msgs[0].role != "system" {
+                msgs.insert(0, agent::system_message_for(Role::Supervisor, &app));
             }
-            (msgs, sess, usage)
+            // 恢复上次退出时未并入历史的 pending 用户消息（收到即落盘，崩溃不丢）
+            if let Err(e) = session_mod::recover_pending(&project_dir, &n, &mut msgs) {
+                eprintln!("[server] 恢复 pending 用户消息失败：{e:#}");
+            }
+            sess = Some(n);
+        } else {
+            msgs.push(agent::system_message_for(Role::Supervisor, &app));
         }
-        None => (
-            vec![agent::system_message_for(Role::Supervisor, &app)],
-            None,
-            session_mod::TokenUsage::default(),
-        ),
+        (msgs, sess, usage)
     };
 
     let state = Arc::new(ServerState {
@@ -123,6 +125,8 @@ pub async fn serve(app: Arc<App>, port: u16) -> anyhow::Result<()> {
         cancel: CancelFlag::new(),
         pending_usage: Arc::new(std::sync::Mutex::new(session_mod::TokenUsage::default())),
         saved_usage: Arc::new(std::sync::Mutex::new(saved_usage)),
+        pending_user: Arc::new(std::sync::Mutex::new(Vec::new())),
+        persist_lock: Arc::new(Mutex::new(())),
     });
 
     let app_router = Router::new()
@@ -140,6 +144,7 @@ pub async fn serve(app: Arc<App>, port: u16) -> anyhow::Result<()> {
         .route("/api/skills", get(list_skills))
         .route("/api/settings/agents", get(get_settings_agents).post(post_settings_agents))
         .route("/api/settings/budget", get(get_settings_budget).post(post_settings_budget))
+        .route("/api/settings/ui", get(get_settings_ui).post(post_settings_ui))
         .route("/api/fee/reset", post(post_fee_reset))
         .route("/api/kb/files", get(get_kb_files))
         .route("/api/kb/file", get(get_kb_file))
@@ -288,7 +293,7 @@ struct FileReq {
 }
 
 async fn get_file(State(st): State<Arc<ServerState>>, axum::extract::Query(req): axum::extract::Query<FileReq>) -> impl IntoResponse {
-    let base = st.app.contest_dir().unwrap_or_else(|| st.app.root.clone());
+    let base = st.app.project_dir();
     let p = base.join(&req.path);
     match std::fs::read_to_string(&p) {
         Ok(content) => Json(json!({ "content": content, "path": req.path })),
@@ -306,7 +311,7 @@ async fn put_file(
     State(st): State<Arc<ServerState>>,
     Json(req): Json<WriteFileReq>,
 ) -> impl IntoResponse {
-    let base = st.app.contest_dir().unwrap_or_else(|| st.app.root.clone());
+    let base = st.app.project_dir();
     let p = base.join(&req.path);
     if let Some(parent) = p.parent() {
         let _ = std::fs::create_dir_all(parent);
@@ -318,26 +323,22 @@ async fn put_file(
 }
 
 async fn get_sessions(State(st): State<Arc<ServerState>>) -> impl IntoResponse {
-    let cdir = st.app.contest_dir();
-    match &cdir {
-        Some(d) => {
-            let metas = session_mod::list(d).unwrap_or_default();
-            let cur = session_mod::current_name(d);
-            let list: Vec<Value> = metas
-                .iter()
-                .map(|m| {
-                    json!({
-                        "name": m.name,
-                        "updated_at": m.updated_at.format("%Y-%m-%d %H:%M:%S").to_string(),
-                        "messages": m.messages,
-                        "current": m.current,
-                    })
-                })
-                .collect();
-            Json(json!({ "sessions": list, "current": cur }))
-        }
-        None => Json(json!({ "sessions": [], "current": null })),
-    }
+    // session 存储于工程目录 `.oiph/sessions`（有比赛=比赛目录，否则=运行目录）
+    let d = st.app.project_dir();
+    let metas = session_mod::list(&d).unwrap_or_default();
+    let cur = session_mod::current_name(&d);
+    let list: Vec<Value> = metas
+        .iter()
+        .map(|m| {
+            json!({
+                "name": m.name,
+                "updated_at": m.updated_at.format("%Y-%m-%d %H:%M:%S").to_string(),
+                "messages": m.messages,
+                "current": m.current,
+            })
+        })
+        .collect();
+    Json(json!({ "sessions": list, "current": cur }))
 }
 
 #[derive(Deserialize)]
@@ -349,10 +350,10 @@ async fn new_session(
     State(st): State<Arc<ServerState>>,
     Json(req): Json<NewSessionReq>,
 ) -> impl IntoResponse {
-    let cdir = st.app.contest_dir();
-    let Some(d) = &cdir else {
-        return Json(json!({ "error": "无比赛工程" }));
-    };
+    let project = st.app.project_dir();
+    let d = &project;
+    // 与"收到即落盘"互斥，避免新建会话时丢失刚收到的用户消息
+    let _guard = st.persist_lock.lock().await;
     // 保存当前
     save_session(&st).await;
     let name = match req.name {
@@ -391,12 +392,44 @@ async fn switch_session(
     State(st): State<Arc<ServerState>>,
     Json(req): Json<SwitchReq>,
 ) -> impl IntoResponse {
-    let cdir = st.app.contest_dir();
-    let Some(d) = &cdir else {
-        return Json(json!({ "error": "无比赛工程" }));
-    };
+    let project = st.app.project_dir();
+    let d = &project;
     if !session_mod::exists(d, &req.name) {
         return Json(json!({ "error": format!("会话 '{}' 不存在", req.name) }));
+    }
+    // 与"收到即落盘"互斥，避免用旧文件内容覆盖刚收到/刚生成的消息
+    let _guard = st.persist_lock.lock().await;
+    // 同一会话：内存中的消息才是最新（页面加载刷新时不替换、不丢失）
+    if st.current_session.lock().await.as_deref() == Some(req.name.as_str()) {
+        let msgs = st.messages.lock().await.clone();
+        let (children_json, usage_json) = match session_mod::load(d, &req.name) {
+            Ok(s) => (
+                s.children.iter().map(|c| json!({
+                    "filename": c.filename,
+                    "agent": c.agent,
+                    "summary": c.summary,
+                })).collect::<Vec<Value>>(),
+                usage_to_value(&st, &s.usage),
+            ),
+            Err(_) => (vec![], usage_to_value(&st, &Default::default())),
+        };
+        let messages_json: Vec<Value> = msgs
+            .iter()
+            .map(|m| {
+                json!({
+                    "role": m.role,
+                    "content": m.content,
+                    "tool_calls": m.tool_calls,
+                })
+            })
+            .collect();
+        return Json(json!({
+            "ok": true,
+            "name": req.name,
+            "messages": messages_json,
+            "children": children_json,
+            "usage": usage_json,
+        }));
     }
     save_session(&st).await;
     match session_mod::load(d, &req.name) {
@@ -537,52 +570,46 @@ async fn handle_ws(mut socket: WebSocket, st: Arc<ServerState>) {
 
     // Agent 处理 task：从 channel 接收 chat 消息，运行 agent
     let (tx_chat, mut rx_chat) = mpsc::unbounded_channel::<String>();
+
+    // 用户消息"收到即落盘"：先写入消息列表并保存 session，再交给 agent 处理。
+    // 独立任务 + 队列保证不阻塞 WS 主循环（中止按钮等仍即时响应），
+    // 且多条消息按发送顺序落盘与处理。
+    let (tx_persist, mut rx_persist) = mpsc::unbounded_channel::<String>();
+    let persist_st = st.clone();
+    let persist_out = tx_out.clone();
+    let persist_chat = tx_chat.clone();
+    let persist_task = tokio::spawn(async move {
+        while let Some(text) = rx_persist.recv().await {
+            if let Some(name) = persist_user_message(&persist_st, &text).await {
+                let _ = persist_out.send(json!({
+                    "type": "session_created",
+                    "name": name,
+                }).to_string());
+            }
+            if persist_chat.send(text).is_err() {
+                break;
+            }
+        }
+    });
+
+    // Agent 处理 task：从 channel 接收 chat 消息，运行 agent
     let agent_task = tokio::spawn(async move {
-        while let Some(user_text) = rx_chat.recv().await {
+        while rx_chat.recv().await.is_some() {
             // 新回合：重置上一回合的中断标志
             st_agent.cancel.reset();
             crate::term::set_ws_sender(Some(tx_agent.as_ref().clone()));
-            // 先写入用户消息
-            {
-                let mut msgs = st_agent.messages.lock().await;
-                msgs[0] = agent::system_message_for(Role::Supervisor, &st_agent.app);
-                msgs.push(ChatMessage::user(user_text));
-            }
-            // 确保 session 存在（第一条消息时创建，文件内含该消息），不存在则自动创建
-            {
-                let sess = st_agent.current_session.lock().await;
-                if sess.is_none() {
-                    drop(sess);
-                    let mut sess = st_agent.current_session.lock().await;
-                    if sess.is_none()
-                        && let Some(cdir) = st_agent.app.contest_dir()
-                            && let Ok(name) = session_mod::auto_name(&cdir) {
-                                let msgs = st_agent.messages.lock().await.clone();
-                                let s = session_mod::Session {
-                                    name: name.clone(),
-                                    created_at: chrono::Utc::now(),
-                                    updated_at: chrono::Utc::now(),
-                                    messages: msgs,
-                                    children: vec![],
-                                    usage: Default::default(),
-                                };
-                                let _ = session_mod::save(&cdir, &s);
-                                *sess = Some(name.clone());
-                                let _ = tx_agent.send(json!({
-                                    "type": "session_created",
-                                    "name": name,
-                                }).to_string());
-                            }
-                }
-            }
+            // 用户消息已由 persist 任务写入消息列表并落盘（见 handle_ws）
             let deps = st_agent.app.deps();
             // 增量保存：工具调用等每步变化都落盘
             let (save_tx, mut save_rx) = mpsc::unbounded_channel::<Vec<ChatMessage>>();
             let saver = st_agent.current_session.lock().await.clone().map(|name| {
                 let app2 = st_agent.app.clone();
                 tokio::spawn(async move {
-                    while let Some(msgs) = save_rx.recv().await {
-                        if let Some(d) = app2.contest_dir() {
+                    while let Some(mut msgs) = save_rx.recv().await {
+                        {
+                            let d = app2.project_dir();
+                            // 合并"已收到但尚未并入历史"的用户消息，防止增量保存覆盖丢失
+                            msgs.extend(session_mod::load_pending(&d, &name));
                             let _ = session_mod::save_messages(&d, &name, &msgs, &session_mod::TokenUsage::default());
                         }
                     }
@@ -672,7 +699,7 @@ async fn handle_ws(mut socket: WebSocket, st: Arc<ServerState>) {
             let msgs = st_agent.messages.lock().await;
             let session_name = st_agent.current_session.lock().await.clone();
             let children: Vec<Value> = match &session_name {
-                Some(n) => match session_mod::load(&st_agent.app.contest_dir().unwrap_or_else(|| st_agent.app.root.clone()), n) {
+                Some(n) => match session_mod::load(&st_agent.app.project_dir(), n) {
                     Ok(s) => s.children.iter().map(|c| json!({
                         "filename": c.filename,
                         "agent": c.agent,
@@ -682,10 +709,17 @@ async fn handle_ws(mut socket: WebSocket, st: Arc<ServerState>) {
                 },
                 None => vec![],
             };
-            let messages_json: Vec<Value> = msgs
+            let mut messages_json: Vec<Value> = msgs
                 .iter()
                 .map(|m| json!({"role": m.role, "content": m.content, "tool_calls": m.tool_calls}))
                 .collect();
+            // 回合期间收到、尚未并入历史的用户消息也推给前端（避免气泡被快照抹掉）
+            if let Some(n) = &session_name {
+                let cdir = st_agent.app.project_dir();
+                messages_json.extend(session_mod::load_pending(&cdir, n).iter().map(|m| {
+                    json!({"role": m.role, "content": m.content, "tool_calls": m.tool_calls})
+                }));
+            }
             let _ = tx_agent.send(
                 json!({ "type": "messages", "messages": messages_json, "children": children, "session_name": session_name }).to_string(),
             );
@@ -707,7 +741,7 @@ async fn handle_ws(mut socket: WebSocket, st: Arc<ServerState>) {
                         if let Ok(req) = serde_json::from_str::<Value>(&text) {
                             match req["type"].as_str() {
                                 Some("chat") => {
-                                    let _ = tx_chat.send(req["text"].as_str().unwrap_or("").to_string());
+                                    let _ = tx_persist.send(req["text"].as_str().unwrap_or("").to_string());
                                 }
                                 Some("stop") => {
                                     eprintln!("[server] 收到停止请求（来自浏览器中止按钮）");
@@ -778,13 +812,70 @@ async fn handle_ws(mut socket: WebSocket, st: Arc<ServerState>) {
     }
 
     drop(tx_chat);
+    drop(tx_persist);
+    persist_task.abort();
     agent_task.abort();
 }
 
+/// 用户消息"收到即落盘"：
+/// 1. 记录到 pending 并写 sidecar（不等待消息锁，意外退出可恢复）；
+/// 2. 确保 session 存在（首条消息创建）；
+/// 3. 等回合释放消息锁后并入历史并保存，清空 sidecar。
+///
+/// 返回新建的 session 名（无新建为 None）。
+async fn persist_user_message(st: &ServerState, text: &str) -> Option<String> {
+    let _guard = st.persist_lock.lock().await;
+    // 1) 收到即记录并写 sidecar（不阻塞在回合的消息锁上）
+    let pending = {
+        let mut p = st.pending_user.lock().unwrap();
+        p.push(ChatMessage::user(text.to_string()));
+        p.clone()
+    };
+    // 2) 确保 session 存在（第一条消息时创建；存储基准 = 工程目录）
+    let d = st.app.project_dir();
+    let mut created = None;
+    {
+        let mut sess = st.current_session.lock().await;
+        if sess.is_none()
+            && let Ok(name) = session_mod::auto_name(&d)
+        {
+            *sess = Some(name.clone());
+            created = Some(name);
+        }
+    }
+    let name = st.current_session.lock().await.clone();
+    // 3) 有 session 时先写 sidecar（收到即落盘，意外退出可恢复）
+    if let Some(name) = &name {
+        let _ = session_mod::save_pending(&d, name, &pending);
+    }
+    // 4) 等回合释放消息锁后并入历史
+    let pending = {
+        let mut p = st.pending_user.lock().unwrap();
+        std::mem::take(&mut *p)
+    };
+    {
+        let mut msgs = st.messages.lock().await;
+        if msgs.is_empty() {
+            msgs.push(agent::system_message_for(Role::Supervisor, &st.app));
+        }
+        msgs[0] = agent::system_message_for(Role::Supervisor, &st.app);
+        msgs.extend(pending);
+    }
+    // 5) 保存并清空 sidecar
+    if let Some(name) = &name {
+        let msgs = st.messages.lock().await.clone();
+        if let Err(e) = session_mod::save_messages(&d, name, &msgs, &session_mod::TokenUsage::default()) {
+            eprintln!("[server] 保存会话失败：{e:#}");
+        }
+        let _ = session_mod::save_pending(&d, name, &[]);
+    }
+    created
+}
+
 async fn save_session(st: &ServerState) {
-    let cdir = st.app.contest_dir();
-    let Some(d) = &cdir else { return };
-    let msgs = st.messages.lock().await;
+    let project = st.app.project_dir();
+    let d = &project;
+    let mut msgs = st.messages.lock().await.clone();
     let mut sess = st.current_session.lock().await;
     let name = match sess.clone() {
         Some(n) => n,
@@ -797,6 +888,8 @@ async fn save_session(st: &ServerState) {
             Err(_) => return,
         },
     };
+    // 合并"已收到但尚未并入历史"的用户消息（收到即落盘，防止保存覆盖丢失）
+    msgs.extend(session_mod::load_pending(d, &name));
     // 取出本回合待保存用量，持久化后并入内存基线（保持全局累计单调不减）
     let add_usage = {
         let mut pending = st.pending_usage.lock().unwrap();
@@ -842,16 +935,17 @@ async fn save_session(st: &ServerState) {
 #[derive(Deserialize)]
 struct ExportSessionReq {
     name: Option<String>,
+    /// 导出格式：`json`（默认）或 `markdown`。
+    #[serde(default)]
+    format: Option<String>,
 }
 
 async fn export_session(
     State(st): State<Arc<ServerState>>,
     Json(req): Json<ExportSessionReq>,
 ) -> impl IntoResponse {
-    let cdir = st.app.contest_dir();
-    let Some(d) = &cdir else {
-        return Json(json!({ "error": "无比赛工程" }));
-    };
+    let project = st.app.project_dir();
+    let d = &project;
     let name = match req.name {
         Some(n) => n,
         None => match st.current_session.lock().await.clone() {
@@ -859,8 +953,23 @@ async fn export_session(
             None => return Json(json!({ "error": "没有当前会话" })),
         },
     };
+    let format = req.format.unwrap_or_else(|| "json".into());
     match session_mod::load(d, &name) {
-        Ok(s) => Json(json!({ "markdown": session_mod::export_markdown(&s) })),
+        Ok(s) => {
+            let content = match format.as_str() {
+                "json" => match session_mod::export_json_all(d, &s) {
+                    Ok(c) => c,
+                    Err(e) => return Json(json!({ "error": format!("{e:#}") })),
+                },
+                "markdown" | "md" => session_mod::export_markdown_all(d, &s),
+                other => {
+                    return Json(json!({
+                        "error": format!("未知导出格式：{other}（支持 json / markdown）")
+                    }));
+                }
+            };
+            Json(json!({ "name": name, "format": format, "content": content }))
+        }
         Err(e) => Json(json!({ "error": format!("{e:#}") })),
     }
 }
@@ -875,10 +984,8 @@ async fn get_sub_session(
     State(st): State<Arc<ServerState>>,
     axum::extract::Query(req): axum::extract::Query<SubSessionReq>,
 ) -> impl IntoResponse {
-    let cdir = st.app.contest_dir();
-    let Some(d) = &cdir else {
-        return Json(json!({ "error": "无比赛工程" }));
-    };
+    let project = st.app.project_dir();
+    let d = &project;
     match session_mod::load_sub(d, &req.session, &req.filename) {
         Ok(sub) => {
             let messages: Vec<Value> = sub.messages.iter().map(|m| json!({
@@ -901,7 +1008,7 @@ async fn kb_search(
     State(st): State<Arc<ServerState>>,
     Json(req): Json<KbSearchReq>,
 ) -> impl IntoResponse {
-    let cfg = st.app.tool_ctx(&st.app.contest_dir().unwrap_or_else(|| st.app.root.clone())).kb_ctx();
+    let cfg = st.app.tool_ctx(&st.app.project_dir()).kb_ctx();
     match crate::kb::search(&cfg, &req.query, 4).await {
         Ok(out) => Json(json!({ "result": out })),
         Err(e) => Json(json!({ "error": format!("{e:#}") })),
@@ -956,10 +1063,7 @@ fn kb_dir_for(st: &ServerState, scope: &str) -> Result<std::path::PathBuf, Strin
     match scope {
         "global" => Ok(crate::paths::global_kb_dir()),
         "project" => {
-            let d = st
-                .app
-                .contest_dir()
-                .ok_or_else(|| "无比赛工程，无法访问工程知识库".to_string())?;
+            let d = st.app.project_dir();
             Ok(crate::paths::project_kb_dir(&d))
         }
         other => Err(format!("未知 scope：{other}")),
@@ -971,10 +1075,7 @@ fn skill_root_for(st: &ServerState, scope: &str) -> Result<std::path::PathBuf, S
     match scope {
         "global" => Ok(crate::paths::global_skills_dir()),
         "project" => {
-            let d = st
-                .app
-                .contest_dir()
-                .ok_or_else(|| "无比赛工程，无法访问工程 skills".to_string())?;
+            let d = st.app.project_dir();
             Ok(crate::paths::project_skills_dir(&d))
         }
         other => Err(format!("未知 scope：{other}")),
@@ -1148,6 +1249,26 @@ async fn post_fee_reset(State(st): State<Arc<ServerState>>) -> impl IntoResponse
     }
 }
 
+// ----- UI 偏好（主题） -----
+
+/// 读取主题；文件不存在时返回默认浅色（兼容旧安装）。
+async fn get_settings_ui() -> impl IntoResponse {
+    Json(json!({ "theme": crate::config::load_theme() }))
+}
+
+#[derive(Deserialize)]
+struct UiSetReq {
+    theme: String,
+}
+
+/// 保存主题到 `~/.oiph/config/ui.json`。
+async fn post_settings_ui(Json(req): Json<UiSetReq>) -> impl IntoResponse {
+    match crate::config::save_theme(&req.theme) {
+        Ok(_) => Json(json!({ "ok": true, "theme": crate::config::load_theme() })),
+        Err(e) => Json(json!({ "error": format!("{e:#}") })),
+    }
+}
+
 // ----- 知识库管理 -----
 
 async fn get_kb_files(State(st): State<Arc<ServerState>>) -> impl IntoResponse {
@@ -1264,7 +1385,7 @@ async fn get_skill_file(
         return Json(json!({ "error": e }));
     }
     let global_root = crate::paths::global_skills_dir();
-    let project_root = st.app.contest_dir().map(|d| crate::paths::project_skills_dir(&d));
+    let project_root = Some(crate::paths::project_skills_dir(&st.app.project_dir()));
     let mut roots: Vec<(std::path::PathBuf, &str)> = vec![(global_root, "global")];
     if let Some(pr) = &project_root {
         roots.push((pr.clone(), "project"));

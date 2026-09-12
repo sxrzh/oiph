@@ -5,3 +5,4 @@ contests/
 ref/
 make_release.sh
 *.zip
+session_*

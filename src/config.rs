@@ -52,6 +52,34 @@ pub fn agents_config_path() -> PathBuf {
     config_dir().join("agents.json")
 }
 
+/// UI 偏好配置（目前仅主题）：`~/.oiph/config/ui.json`。
+pub fn ui_config_path() -> PathBuf {
+    config_dir().join("ui.json")
+}
+
+/// 读取主题。文件不存在、内容非法或值不认识时一律默认 "light"（兼容旧安装）。
+pub fn load_theme() -> String {
+    let Ok(raw) = std::fs::read_to_string(ui_config_path()) else {
+        return "light".into();
+    };
+    let Ok(v) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        return "light".into();
+    };
+    match v.get("theme").and_then(|t| t.as_str()) {
+        Some("dark") => "dark".into(),
+        _ => "light".into(),
+    }
+}
+
+/// 保存主题（仅接受 "light"/"dark"）。
+pub fn save_theme(theme: &str) -> Result<()> {
+    anyhow::ensure!(theme == "light" || theme == "dark", "非法主题：{theme}");
+    std::fs::create_dir_all(config_dir())?;
+    let v = serde_json::json!({ "theme": theme });
+    std::fs::write(ui_config_path(), serde_json::to_vec_pretty(&v)?)?;
+    Ok(())
+}
+
 #[derive(Debug, Clone, serde::Serialize, Deserialize)]
 pub struct AgentConfig {
     #[serde(default)]
@@ -275,6 +303,22 @@ mod tests {
         let guard = crate::paths::tests::sandbox_home("tilde");
         assert_eq!(expand_tilde("~/x.md"), guard.home().join("x.md"));
         assert_eq!(expand_tilde("/abs/x.md"), PathBuf::from("/abs/x.md"));
+    }
+
+    #[test]
+    fn theme_default_light_and_roundtrip() {
+        let _guard = crate::paths::tests::sandbox_home("theme");
+        // 配置文件不存在：默认浅色（兼容旧安装）
+        assert_eq!(load_theme(), "light");
+        save_theme("dark").unwrap();
+        assert_eq!(load_theme(), "dark");
+        save_theme("light").unwrap();
+        assert_eq!(load_theme(), "light");
+        // 非法值拒绝
+        assert!(save_theme("blue").is_err());
+        // 内容被破坏时回退浅色
+        std::fs::write(ui_config_path(), "not json").unwrap();
+        assert_eq!(load_theme(), "light");
     }
 
     #[test]

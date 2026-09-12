@@ -338,6 +338,52 @@ pub fn delete(contest_dir: &Path, name: &str) -> Result<()> {
     Ok(())
 }
 
+/// 尚未并入 session 历史的用户消息 sidecar 文件名（意外退出恢复用）。
+const PENDING_FILE: &str = "pending_user.json";
+
+/// 保存"已收到但尚未并入历史"的用户消息（收到即落盘，防止意外退出丢失）。
+/// 空列表即删除 sidecar。
+pub fn save_pending(contest_dir: &Path, name: &str, messages: &[Message]) -> Result<()> {
+    let dir = session_dir(contest_dir, name);
+    let path = dir.join(PENDING_FILE);
+    if messages.is_empty() {
+        let _ = std::fs::remove_file(&path);
+        return Ok(());
+    }
+    std::fs::create_dir_all(&dir)?;
+    std::fs::write(&path, serde_json::to_vec_pretty(messages)?)?;
+    Ok(())
+}
+
+/// 读取尚未并入历史的 pending 用户消息。
+pub fn load_pending(contest_dir: &Path, name: &str) -> Vec<Message> {
+    std::fs::read_to_string(session_dir(contest_dir, name).join(PENDING_FILE))
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok())
+        .unwrap_or_default()
+}
+
+/// 启动恢复：把上次退出时未并入历史的 pending 用户消息追加进 `messages` 并保存。
+pub fn recover_pending(contest_dir: &Path, name: &str, messages: &mut Vec<Message>) -> Result<()> {
+    let pending = load_pending(contest_dir, name);
+    if pending.is_empty() {
+        return Ok(());
+    }
+    // 尾部去重：保存成功后、清理 sidecar 前崩溃的窗口
+    let n = pending.len();
+    let already = messages.len() >= n
+        && messages[messages.len() - n..]
+            .iter()
+            .zip(&pending)
+            .all(|(a, b)| a.role == b.role && a.content == b.content);
+    if !already {
+        messages.extend(pending);
+    }
+    save_messages(contest_dir, name, messages, &TokenUsage::default())?;
+    save_pending(contest_dir, name, &[])?;
+    Ok(())
+}
+
 pub fn list(contest_dir: &Path) -> Result<Vec<SessionMeta>> {
     let dir = sessions_dir(contest_dir);
     if !dir.exists() {
@@ -399,15 +445,52 @@ pub fn last(contest_dir: &Path) -> Result<Option<Session>> {
     Ok(None)
 }
 
-pub fn export_markdown(s: &Session) -> String {
-    let mut out = format!(
-        "# Session: {}\n\n创建：{}\n更新：{}\n消息数：{}\n\n",
-        s.name,
-        s.created_at.format("%Y-%m-%d %H:%M:%S"),
-        s.updated_at.format("%Y-%m-%d %H:%M:%S"),
-        s.messages.len()
-    );
-    for m in &s.messages {
+/// 导出会话为 JSON（与磁盘存储格式一致，含 messages/children/usage 等字段）。
+/// 导出主 session + 全部子 session 为 JSON 数组：
+/// 第一项为主 session（`type: "main"`），其后依次为子 session（`type: "sub"`）。
+pub fn export_json_all(contest_dir: &Path, main: &Session) -> anyhow::Result<String> {
+    let mut items: Vec<serde_json::Value> = Vec::new();
+    let mut main_val = serde_json::to_value(main)?;
+    if let Some(obj) = main_val.as_object_mut() {
+        obj.insert("type".into(), serde_json::json!("main"));
+    }
+    items.push(main_val);
+    for c in &main.children {
+        let messages = load_sub(contest_dir, &main.name, &c.filename)
+            .map(|s| s.messages)
+            .unwrap_or_default();
+        items.push(serde_json::json!({
+            "type": "sub",
+            "filename": c.filename,
+            "agent": c.agent,
+            "summary": c.summary,
+            "messages": messages,
+        }));
+    }
+    Ok(serde_json::to_string_pretty(&items)?)
+}
+
+/// 导出主 session + 全部子 session 为 Markdown：主 session 在前，子 session 依次附后。
+pub fn export_markdown_all(contest_dir: &Path, main: &Session) -> String {
+    let mut out = export_markdown(main);
+    for c in &main.children {
+        out.push_str("\n---\n\n");
+        out.push_str(&format!("# 子会话：{}（{}）\n\n", c.agent, c.filename));
+        if !c.summary.is_empty() {
+            out.push_str(&format!("> {}\n\n", c.summary));
+        }
+        match load_sub(contest_dir, &main.name, &c.filename) {
+            Ok(sub) => out.push_str(&render_messages_markdown(&sub.messages)),
+            Err(_) => out.push_str("（子会话文件缺失）\n\n"),
+        }
+    }
+    out
+}
+
+/// 渲染消息列表为 Markdown（不含会话头）。
+fn render_messages_markdown(messages: &[Message]) -> String {
+    let mut out = String::new();
+    for m in messages {
         out.push_str(&format!("## {}\n\n", m.role));
         if let Some(c) = &m.content
             && !c.is_empty() {
@@ -421,6 +504,18 @@ pub fn export_markdown(s: &Session) -> String {
             out.push('\n');
         }
     }
+    out
+}
+
+fn export_markdown(s: &Session) -> String {
+    let mut out = format!(
+        "# Session: {}\n\n创建：{}\n更新：{}\n消息数：{}\n\n",
+        s.name,
+        s.created_at.format("%Y-%m-%d %H:%M:%S"),
+        s.updated_at.format("%Y-%m-%d %H:%M:%S"),
+        s.messages.len()
+    );
+    out.push_str(&render_messages_markdown(&s.messages));
     out
 }
 
@@ -509,6 +604,74 @@ mod tests {
         };
         let md = export_markdown(&s);
         assert!(md.contains("hello"));
+    }
+
+    #[test]
+    fn pending_roundtrip_and_recover() {
+        let c = tmp_contest();
+        save_pending(&c, "s1", &[Message::user("late")]).unwrap();
+        assert_eq!(load_pending(&c, "s1").len(), 1);
+
+        // 恢复：追加到历史尾部并清空 sidecar
+        let mut msgs = vec![Message::system("sys"), Message::user("hi")];
+        recover_pending(&c, "s1", &mut msgs).unwrap();
+        assert_eq!(msgs.len(), 3);
+        assert_eq!(msgs[2].content.as_deref(), Some("late"));
+        assert!(load_pending(&c, "s1").is_empty());
+
+        // 再次恢复：无 pending 不重复
+        recover_pending(&c, "s1", &mut msgs).unwrap();
+        assert_eq!(msgs.len(), 3);
+
+        // 尾部去重：sidecar 与历史尾部相同（保存后崩溃窗口）不重复追加
+        save_pending(&c, "s1", &[Message::user("late")]).unwrap();
+        recover_pending(&c, "s1", &mut msgs).unwrap();
+        assert_eq!(msgs.len(), 3);
+
+        std::fs::remove_dir_all(&c).ok();
+    }
+
+    #[test]
+    fn export_json_all_includes_sub_sessions() {
+        let c = tmp_contest();
+        // 主 session 保存两次：第二次触发 pending 子 session 落盘
+        let msgs = vec![Message::user("hello"), Message {
+            role: "assistant".into(),
+            content: Some("world".into()),
+            tool_calls: None,
+            tool_call_id: None,
+            reasoning: None,
+        }];
+        save_messages(&c, "t", &msgs, &TokenUsage::default()).unwrap();
+        push_pending_sub_session(
+            "solution".into(),
+            vec![Message::user("子任务"), Message::system("完成")],
+            "写 std".into(),
+        );
+        save_messages(&c, "t", &msgs, &TokenUsage::default()).unwrap();
+        let s = load(&c, "t").unwrap();
+        assert_eq!(s.children.len(), 1);
+
+        // JSON：最外层是列表，第一项主 session，其后子 session
+        let json = export_json_all(&c, &s).unwrap();
+        let arr: Vec<serde_json::Value> = serde_json::from_str(&json).unwrap();
+        assert_eq!(arr.len(), 2);
+        assert_eq!(arr[0]["type"], "main");
+        assert_eq!(arr[0]["name"], "t");
+        assert!(json.contains("hello") && json.contains("world"));
+        assert_eq!(arr[1]["type"], "sub");
+        assert_eq!(arr[1]["agent"], "solution");
+        assert_eq!(arr[1]["summary"], "写 std");
+        assert_eq!(arr[1]["messages"].as_array().unwrap().len(), 2);
+        assert!(arr[1]["messages"][0]["content"].as_str().unwrap().contains("子任务"));
+
+        // Markdown：主 session 在前，子 session 附后
+        let md = export_markdown_all(&c, &s);
+        assert!(md.contains("hello"));
+        assert!(md.contains("子会话：solution"));
+        assert!(md.contains("子任务"));
+
+        std::fs::remove_dir_all(&c).ok();
     }
 
     fn assistant_with_tool_calls(ids: &[&str]) -> Message {

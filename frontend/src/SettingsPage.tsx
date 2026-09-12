@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react';
 import { CodeEditor } from './components/CodeEditor';
 import { swAlert } from './components/sw';
-import { getTheme, saveTheme, type Theme } from './theme';
+import { fetchTheme, getCachedTheme, saveTheme, type Theme } from './theme';
 
 // ---------------------------------------------------------------------------
 // 类型
@@ -142,10 +142,17 @@ function BudgetCard() {
 }
 
 function AppearanceCard() {
-  const [theme, setTheme] = useState<Theme>(getTheme());
-  const change = (t: Theme) => {
+  const [theme, setTheme] = useState<Theme>(getCachedTheme());
+  // 以服务器 config 为准（本地缓存仅防闪烁）
+  useEffect(() => {
+    fetchTheme().then(t => { if (t) setTheme(t); });
+  }, []);
+  const change = async (t: Theme) => {
     setTheme(t);
-    saveTheme(t);
+    const ok = await saveTheme(t);
+    if (!ok) {
+      swAlert('保存失败', '主题已在本页生效，但未能写入服务器 ~/.oiph/config/ui.json（请检查后端是否在运行）。');
+    }
   };
   return (
     <div className="settings-card">
@@ -159,7 +166,7 @@ function AppearanceCard() {
           </select>
         </div>
       </div>
-      <p className="hint" style={{ margin: 0 }}>立即生效并记住选择，主界面与设置页共用。</p>
+      <p className="hint" style={{ margin: 0 }}>立即生效并保存到 ~/.oiph/config/ui.json（所有浏览器共用；不存在时默认浅色）。</p>
     </div>
   );
 }

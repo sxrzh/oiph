@@ -40,6 +40,18 @@ export async function switchSession(name: string): Promise<SwitchSessionResp> {
   }).then(r => r.json());
 }
 
+/** 导出会话：format 默认 json，可选 markdown。 */
+export async function exportSession(
+  name: string | null,
+  format: 'json' | 'markdown' = 'json',
+): Promise<{ name?: string; format?: string; content?: string; error?: string }> {
+  return fetch('/api/session/export', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name, format }),
+  }).then(r => r.json());
+}
+
 export interface SwitchSessionResp {
   ok?: boolean;
   error?: string;

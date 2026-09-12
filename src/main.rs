@@ -280,12 +280,15 @@ enum SessionCmd {
     Use { name: String },
     /// 删除会话。
     Delete { name: String },
-    /// 导出会话为 markdown 文件。
+    /// 导出会话（默认 JSON；`--format markdown` 可导出 Markdown）。
     Export {
         /// 会话名（默认当前）。
         name: Option<String>,
-        /// 输出路径（默认 <名>.md）。
+        /// 输出路径（默认 <会话名>.json / <会话名>.md）。
         out: Option<String>,
+        /// 导出格式：json（默认）或 markdown。
+        #[arg(long, default_value = "json")]
+        format: String,
     },
     /// 打印会话内容（markdown 到 stdout）。
     Show {
@@ -534,9 +537,8 @@ fn run_skill_cmd(cli: &Cli, cmd: &SkillCmd) -> Result<()> {
 
 fn run_session_cmd(cli: &Cli, cmd: &SessionCmd) -> Result<()> {
     let root = std::env::current_dir()?;
-    let Some(cdir) = resolve_contest(&root, cli.contest.as_deref()) else {
-        bail!("当前没有比赛工程（session 存储于 <比赛工程>/.oiph/sessions/）");
-    };
+    // session 存储于工程目录 `.oiph/sessions`（有比赛=比赛目录，否则=运行目录）
+    let cdir = resolve_contest(&root, cli.contest.as_deref()).unwrap_or(root);
     match cmd {
         SessionCmd::List => {
             let metas = session::list(&cdir)?;
@@ -590,18 +592,23 @@ fn run_session_cmd(cli: &Cli, cmd: &SessionCmd) -> Result<()> {
             println!("已删除会话 '{name}'");
             Ok(())
         }
-        SessionCmd::Export { name, out } => {
+        SessionCmd::Export { name, out, format } => {
             let name = resolve_session_name(&cdir, name.as_deref())?;
             let s = session::load(&cdir, &name)?;
-            let out_path = out.clone().unwrap_or_else(|| format!("{name}.md"));
-            std::fs::write(&out_path, session::export_markdown(&s))?;
-            println!("已导出会话 '{name}' 到 {out_path}");
+            let (content, ext) = match format.as_str() {
+                "json" => (session::export_json_all(&cdir, &s)?, "json"),
+                "markdown" | "md" => (session::export_markdown_all(&cdir, &s), "md"),
+                other => bail!("未知导出格式：{other}（支持 json / markdown）"),
+            };
+            let out_path = out.clone().unwrap_or_else(|| format!("{name}.{ext}"));
+            std::fs::write(&out_path, content)?;
+            println!("已导出会话 '{name}'（{format}）到 {out_path}");
             Ok(())
         }
         SessionCmd::Show { name } => {
             let name = resolve_session_name(&cdir, name.as_deref())?;
             let s = session::load(&cdir, &name)?;
-            print!("{}", session::export_markdown(&s));
+            print!("{}", session::export_markdown_all(&cdir, &s));
             Ok(())
         }
     }
@@ -802,30 +809,24 @@ async fn run_repl(cli: &Cli, root: &Path) -> Result<()> {
         messages.push(Message::user(trimmed.clone()));
         let deps = app.deps();
 
-        // 第一条消息时创建 session（CLI 与 GUI 行为一致）
-        if current_session.is_none()
-            && let Some(cdir) = app.contest_dir()
-        {
-            match session::auto_name(&cdir) {
-                Ok(name) => {
-                    let s = session::Session {
-                        name: name.clone(),
-                        created_at: chrono::Utc::now(),
-                        updated_at: chrono::Utc::now(),
-                        messages: messages.clone(),
-                        children: vec![],
-                        usage: Default::default(),
-                    };
-                    let _ = session::save(&cdir, &s);
-                    current_session = Some(name);
-                }
+        // 确保 session 存在（第一条消息时创建），并立即落盘用户消息；
+        // 回合内由 saver 增量保存，防止意外退出丢失
+        if current_session.is_none() {
+            match session::auto_name(&app.project_dir()) {
+                Ok(name) => current_session = Some(name),
                 Err(e) => eprintln!("创建会话失败：{e:#}"),
             }
+        }
+        if let Some(name) = current_session.clone()
+            && let Err(e) = session::save_messages(&app.project_dir(), &name, &messages, &session::TokenUsage::default())
+        {
+            eprintln!("保存会话失败：{e:#}");
         }
 
         // 增量保存：工具调用等每步变化都落盘
         let (save_tx, mut save_rx) = tokio::sync::mpsc::unbounded_channel::<Vec<Message>>();
-        let saver = current_session.clone().zip(app.contest_dir()).map(|(name, cdir)| {
+        let saver = current_session.clone().map(|name| {
+            let cdir = app.project_dir();
             tokio::spawn(async move {
                 while let Some(msgs) = save_rx.recv().await {
                     let _ = session::save_messages(&cdir, &name, &msgs, &session::TokenUsage::default());
@@ -913,9 +914,7 @@ fn save_current_session(
     current_session: &mut Option<String>,
     add_usage: &session::TokenUsage,
 ) {
-    let Some(cdir) = app.contest_dir() else {
-        return;
-    };
+    let cdir = app.project_dir();
     let name = match current_session.clone() {
         Some(n) => n,
         None => match session::auto_name(&cdir) {
@@ -1263,9 +1262,7 @@ async fn handle_slash_session(
     messages: &mut Vec<Message>,
     current_session: &mut Option<String>,
 ) -> Result<()> {
-    let Some(cdir) = app.contest_dir() else {
-        bail!("session 需要比赛工程（/contest new <名> 创建）");
-    };
+    let cdir = app.project_dir();
     match args {
         [] | ["list"] => {
             let metas = session::list(&cdir)?;
@@ -1338,8 +1335,8 @@ async fn handle_slash_session(
                 .get(2)
                 .map(|s| s.to_string())
                 .unwrap_or_else(|| format!("{name}.md"));
-            std::fs::write(&out, session::export_markdown(&s))?;
-            println!("已导出会话 '{name}' 到 {out}");
+            std::fs::write(&out, session::export_markdown_all(&cdir, &s))?;
+            println!("已导出会话 '{name}'（含子会话）到 {out}");
         }
         _ => println!(
             "用法：/session list | /session new [名] | /session use <名> | /session delete <名> | /session export [名] [路径]"
